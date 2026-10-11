@@ -1,0 +1,61 @@
+menu "ePaper MQTT"
+
+    config BROKER_URI
+        string "URI del broker MQTT"
+        default "mqtt://test.mosquitto.org"
+        help
+            Ej: mqtt://192.168.1.10, mqtt://usuario:clave@host:1883
+
+    config MQTT_TOPIC
+        string "Topic para texto"
+        default "reterminal/texto"
+
+    config MQTT_TOPIC_IMAGEN
+        string "Topic para imágenes"
+        default "reterminal/imagen"
+        help
+            Payload: zlib de 800x480 a 1 bit por píxel (48000 bytes sin
+            comprimir), filas de arriba abajo, MSB = píxel izquierdo,
+            bit 1 = blanco. Es lo que da Pillow con Image.convert("1").tobytes().
+
+    config SIN_DEEP_SLEEP
+        bool "Modo pruebas: no dormir nunca"
+        default n
+        help
+            Se queda conectado y pinta cada mensaje en cuanto llega. Cada
+            pintado sigue el mismo camino que tras un deep sleep (reset del
+            panel + restore_baseline + parcial), así que sirve para probarlo
+            sin esperar. Gasta mucha batería: sólo para desarrollo.
+
+    config INTERVALO_S
+        int "Segundos en deep sleep entre comprobaciones"
+        range 10 86400
+        default 300
+        help
+            Cada despertar conecta WiFi y MQTT, recoge el último mensaje y
+            vuelve a dormir. Menos segundos = más rápido en reaccionar, más
+            consumo.
+
+    config VENTANA_MS
+        int "Milisegundos esperando mensajes tras suscribirse"
+        default 2000
+        help
+            Tiempo de espera para que el broker entregue los mensajes
+            retenidos o pendientes de la sesión persistente.
+
+    config TIMEOUT_CONEXION_S
+        int "Segundos máximos para conectar al broker"
+        default 20
+
+    config PARCIALES_MAX
+        int "Refrescos parciales seguidos antes de forzar uno completo"
+        default 10
+
+    config FULL_CADA_H
+        int "Horas máximas sin refresco completo"
+        default 24
+        help
+            Si la última actualización completa es más antigua, la siguiente
+            será completa aunque queden parciales disponibles.
+
+endmenu

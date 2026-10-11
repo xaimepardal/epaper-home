@@ -1,0 +1,16 @@
+dependencies:
+  idf: ">=5.5"
+  # Copias parcheadas (restore_baseline): ver components/*/PATCH.md
+  cleishm/idfxx_epaper:
+    version: "^1.0.0"
+    override_path: "../components/idfxx_epaper"
+  cleishm/idfxx_epaper_uc8179:
+    version: "^1.0.0"
+    override_path: "../components/idfxx_epaper_uc8179"
+  cleishm/idfxx_gfx: "^1.0.0"
+  cleishm/idfxx_spi: "^1.0.0"
+  cleishm/idfxx_font_spleen: "^1.0.0"
+  espressif/mqtt: "^1.0.0"
+  joltwallet/littlefs: "^1.22.0"
+  protocol_examples_common:
+    path: ${IDF_PATH}/examples/common_components/protocol_examples_common

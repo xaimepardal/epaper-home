@@ -1,0 +1,14 @@
+# Tabla de particiones para el reTerminal E1001 (flash de 32 MB)
+#
+# Las apps quedan por debajo de 16 MB: el ESP32-S3 solo puede ejecutar código
+# desde ahí sin opciones experimentales. "storage" pasa de 16 MB, pero se accede
+# con esp_flash (direccionamiento de 32 bits), no mapeado en caché, así que no hay problema.
+#
+# Name,   Type, SubType,  Offset,    Size
+nvs,      data, nvs,      0x9000,    0x6000
+otadata,  data, ota,      0xf000,    0x2000
+phy_init, data, phy,      0x11000,   0x1000
+ota_0,    app,  ota_0,    0x20000,   0x600000
+ota_1,    app,  ota_1,    0x620000,  0x600000
+coredump, data, coredump, 0xc20000,  0x10000
+storage,  data, littlefs, 0xc30000,  0x13d0000

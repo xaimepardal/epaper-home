@@ -1,0 +1,25 @@
+# Generado por ESP-IDF
+build/
+managed_components/
+
+# Configuración local: contiene el SSID y la contraseña WiFi
+sdkconfig
+sdkconfig.old
+
+# Python
+__pycache__/
+*.pyc
+
+# Secretos locales (claves, credenciales)
+.env
+*.env
+
+# Editores y sistema
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# Previsualizaciones de tools/enviar_imagen.py
+previa*.png
