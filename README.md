@@ -6,7 +6,7 @@ Firmware para el **Seeed Studio reTerminal E1001** (ESP32-S3 + ePaper monocromo 
 
 - **Imágenes por MQTT** (`reterminal/imagen/<índice>`). Cada imagen va **retenida en su propio topic**, con el índice (0 a 9 por defecto) al final, y se guarda en ese hueco de LittleFS, sustituyendo a la anterior. Son imágenes de 800×480 a 1 bit comprimidas con zlib; el ESP32 las descomprime con el *inflate* de su ROM y descarta las que lleguen corruptas. Un retenido vacío borra esa imagen. Formato en [Formato de las imágenes](#formato-de-las-imágenes).
 - **Solo descarga lo que cambia, y se recupera solo**. Los retenidos del broker son el estado completo; la sesión persistente guarda en cola los cambios mientras el dispositivo duerme. Ver [Sincronización](#sincronización).
-- **Estado en MQTT** (`reterminal/estado`). En cada conexión publica, retenido, un JSON con la versión del firmware, la causa del despertar, la imagen seleccionada, los huecos ocupados y el RSSI de la WiFi.
+- **Estado en MQTT** (`reterminal/estado`). En cada conexión publica, retenido, un JSON con la versión del firmware, la causa del despertar, la imagen seleccionada, los huecos ocupados, el RSSI de la WiFi, la batería y la PSRAM detectada.
 - **Imagen seleccionada**. La pantalla muestra siempre la imagen del índice seleccionado, que se guarda en LittleFS y sobrevive a reinicios. Al llegar imágenes nuevas no se cambia de índice; solo se repinta si llega una nueva versión de la que se está viendo. Si se borra la seleccionada, pasa a la siguiente que exista.
 - **Indicadores en pantalla**, en negro sobre un recuadro blanco para que se lean sobre cualquier imagen. Se dibujan al pintar, no se guardan en las imágenes, y si cambian se repinta:
   - **Arriba a la izquierda, «k/N»**: posición de la imagen entre las guardadas (con dos, «1/2» y «2/2»).
@@ -21,6 +21,7 @@ Firmware para el **Seeed Studio reTerminal E1001** (ESP32-S3 + ePaper monocromo 
 - **Modo batería**. Despierta cada hora (configurable) o al pulsar un botón. Por tiempo, se conecta a la WiFi y a MQTT con sesión persistente, guarda las imágenes en cola, pinta si hace falta y vuelve a dormir. Pasar de imagen con los botones no adelanta ni retrasa la siguiente comprobación.
 - **Modo pruebas** (opcional). No usa deep sleep: se queda conectado, guarda cada imagen en cuanto llega y atiende los botones al momento.
 - **Pantallas de estado**. «Esperando imágenes» o «Sin conexión» cuando aún no hay ninguna imagen guardada.
+- **PSRAM de 8 MB**. Activada en modo Octal; los bloques de más de 16 KB (framebuffers, mensajes MQTT) van a ella y la RAM interna queda para la WiFi y el TLS. Si no se detecta, arranca sin ella. Sin test de memoria al arrancar, que se repetiría en cada despertar. Ver [Comprobar la PSRAM](#comprobar-la-psram).
 - **Volcado de fallos** en la partición `coredump`, que se lee con `idf.py coredump-info`.
 - **Herramienta de PC** [`tools/enviar_imagen.py`](tools/enviar_imagen.py). Convierte cualquier imagen (PNG, JPG…) al formato del panel, con tramado o umbral, y la publica en el índice indicado; también borra índices.
 
@@ -29,7 +30,7 @@ Firmware para el **Seeed Studio reTerminal E1001** (ESP32-S3 + ePaper monocromo 
 | | |
 |---|---|
 | Dispositivo | [reTerminal E1001](https://www.seeedstudio.com/reTerminal-E1001-p-6534.html) — [wiki](https://wiki.seeedstudio.com/getting_started_with_reterminal_e1001/) · [serie reTerminal E](https://wiki.seeedstudio.com/reterminal_e10xx_main_page/) · [datasheet](https://files.seeedstudio.com/Bazaar/product_pdf/100073581.pdf) |
-| SoC | ESP32-S3, 32 MB de flash |
+| SoC | ESP32-S3, 32 MB de flash, 8 MB de PSRAM (Octal) |
 | Pantalla | ePaper 7,5" monocromo, 800×480, controlador UC8179 (panel GDEY075T7) |
 | Conexión al PC | USB-C (conversor USB-serie: aparece como `/dev/ttyUSB0` en Linux) |
 
@@ -220,6 +221,19 @@ import zlib
 from PIL import Image
 payload = zlib.compress(Image.open("imagen.png").resize((800, 480)).convert("1").tobytes(), 9)
 ```
+
+## Comprobar la PSRAM
+
+El firmware la configura como **Octal** (`sdkconfig.defaults`). Para confirmarlo en tu placa:
+
+1. Con el reTerminal conectado por USB, pregunta al chip (no borra nada; solo lo reinicia):
+
+   ```bash
+   python -m esptool --chip esp32s3 -p /dev/ttyUSB0 flash-id
+   ```
+
+   En `Features` debe aparecer `Embedded PSRAM 8MB`. Las PSRAM de 8 MB del ESP32-S3 son Octal.
+2. Al arrancar, el log dice `PSRAM: 8192 KB`, y `reterminal/estado` trae `"psram":8388608`. Si sale `0`, la PSRAM no se ha inicializado: el modo no es el de la placa (en el log de arranque sale el error de `esp_psram`). En ese caso cambia en `menuconfig` → *Component config → ESP PSRAM → Mode* a *Quad* y vuelve a flashear. El equipo funciona igual sin PSRAM, solo con menos memoria.
 
 ## Estructura del proyecto
 

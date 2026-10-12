@@ -40,10 +40,12 @@
 #include "driver/gpio.h"
 #include "esp_app_desc.h"
 #include "esp_crt_bundle.h"
+#include "esp_heap_caps.h"
 #include "esp_event.h"
 #include "esp_littlefs.h"
 #include "esp_log.h"
 #include "esp_mac.h"
+#include "esp_psram.h"
 #include "esp_rom_crc.h"
 #include "esp_sleep.h"
 #include "esp_system.h"
@@ -516,6 +518,17 @@ static void paint(const idfxx::epaper::mono_framebuffer &frame, const idfxx::epa
     display.sleep();
 }
 
+// PSRAM detectada en bytes (0 = no hay o no se inicializó: modo equivocado,
+// p. ej. Quad en vez de Octal; con SPIRAM_IGNORE_NOTFOUND arranca igualmente)
+static size_t psram_size()
+{
+#if CONFIG_SPIRAM
+    return esp_psram_is_initialized() ? esp_psram_get_size() : 0;
+#else
+    return 0;
+#endif
+}
+
 // ---------------------------------------------------------------------------
 // MQTT
 // ---------------------------------------------------------------------------
@@ -823,11 +836,12 @@ static void publish_status(esp_mqtt_client_handle_t client)
     wifi_ap_record_t ap{};
     const int rssi = esp_wifi_sta_get_ap_info(&ap) == ESP_OK ? ap.rssi : 0;
 
-    char json[256];
+    char json[1280];  // cabe la lista de 255 huecos
     snprintf(json, sizeof(json),
-             R"({"firmware":"%s","despertar":"%s","seleccion":%d,"imagenes":[%s],"rssi":%d,"despierto_ms":%lld})",
+             R"({"firmware":"%s","despertar":"%s","seleccion":%d,"imagenes":[%s],"rssi":%d,"bateria":%d,)"
+             R"("psram":%u,"despierto_ms":%lld})",
              esp_app_get_description()->version, wakeup_cause, sel ? static_cast<int>(*sel) : -1,
-             images.c_str(), rssi, esp_timer_get_time() / 1000);
+             images.c_str(), rssi, rtc.battery, static_cast<unsigned>(psram_size()), esp_timer_get_time() / 1000);
     xEventGroupClearBits(events, BIT_PUBLISHED);
     if (esp_mqtt_client_publish(client, CONFIG_MQTT_STATUS_TOPIC, json, 0, 1, 1) < 0 ||
         !(xEventGroupWaitBits(events, BIT_PUBLISHED, pdTRUE, pdTRUE, pdMS_TO_TICKS(3000)) & BIT_PUBLISHED)) {
@@ -1057,6 +1071,8 @@ static void handle_button(button b, bool lfs)
 extern "C" void app_main()
 {
     sd_release_bus();
+    ESP_LOGI(TAG, "PSRAM: %u KB; RAM interna libre: %u KB", static_cast<unsigned>(psram_size() / 1024),
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024));
     setup_buttons();
     events = xEventGroupCreate();
     mtx = xSemaphoreCreateMutex();
