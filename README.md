@@ -120,7 +120,7 @@ idf.py menuconfig
 | Segundos entre comprobaciones | 3600 (1 h) | alineadas al reloj desde la medianoche local: 3600 = en punto, 1800 = :00 y :30; mejor un divisor de 24 h |
 | Servidor NTP | `pool.ntp.org` | por nombre necesita DNS (con IP estática, el router); vale una IP |
 | Zona horaria | `CET-1CEST,M3.5.0,M10.5.0/3` | formato POSIX TZ |
-| Ms esperando mensajes | 1000 | sin mensajes nuevos para dar la cola (o los retenidos) por recibida |
+| Ms esperando mensajes | 500 | sin mensajes nuevos para dar la cola (o los retenidos) por recibida |
 | Segundos máximos para conectar | 20 | |
 | Parciales antes de un completo | 10 | |
 | Horas máximas sin completo | 24 | |
