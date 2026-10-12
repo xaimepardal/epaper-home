@@ -563,26 +563,94 @@ static void sd_release_bus()
     gpio_set_level(GPIO_NUM_14, 1);  // SD_CS inactivo
 }
 
-// Pinta `nuevo`. Con `anterior` (lo que hay en el cristal) hace refresco
-// parcial; sin él, completo. Deja el panel en deep sleep.
+// ---------------------------------------------------------------------------
+// Panel. Se mantiene encendido, y con el modo de refresco ya cargado, mientras
+// dura una tanda de pintados (p. ej. varias pulsaciones seguidas): cada cambio
+// es entonces "enviar la zona que cambia + refresco", sin reset, sin volver a
+// encender la alimentación (100 ms + BUSY cada vez) y sin mandar 48 KB.
+// end_painting() lo duerme y guarda frame.bin.
+// ---------------------------------------------------------------------------
+static idfxx::spi::bus_config panel_bus_config()
+{
+    idfxx::spi::bus_config cfg{};
+    cfg.mosi = idfxx::gpio_9;
+    cfg.sclk = idfxx::gpio_7;
+    return cfg;
+}
+
+struct panel_session {
+    idfxx::spi::master_bus bus{idfxx::spi::host_device::spi2, idfxx::spi::dma_chan::ch_auto, panel_bus_config()};
+    idfxx::panel_io io{bus, idfxx::epaper::uc8179::spi_io_config(idfxx::gpio_10 /*CS*/, idfxx::gpio_11 /*DC*/)};
+    idfxx::epaper::uc8179 display{io, {.reset_gpio = idfxx::gpio_12, .busy_gpio = idfxx::gpio_13}};
+    // Al crearse, el driver pone en blanco las dos RAM del controlador. Tras el
+    // primer pintado completo, la RAM "nueva" coincide con el cristal (y la
+    // "anterior" también: N2OCP la copia en cada refresco), así que basta con
+    // reescribir la zona que cambia.
+    bool ram_matches_glass = false;
+};
+static std::unique_ptr<panel_session> panel;
+
+// Rectángulo de bytes completos (x y ancho múltiplos de 8) donde `a` y `b`
+// difieren; vacío (h == 0) si son iguales.
+struct region {
+    size_t x, y, w, h;
+};
+static region changed_region(const idfxx::epaper::mono_framebuffer &a, const idfxx::epaper::mono_framebuffer &b)
+{
+    const size_t stride = a.stride_bytes();
+    const auto da = a.data(), db = b.data();
+    size_t y0 = SIZE_MAX, y1 = 0, c0 = SIZE_MAX, c1 = 0;
+    for (size_t y = 0; y < a.height(); ++y) {
+        for (size_t c = 0; c < stride; ++c) {
+            if (da[y * stride + c] != db[y * stride + c]) {
+                y0 = std::min(y0, y);
+                y1 = y;
+                c0 = std::min(c0, c);
+                c1 = std::max(c1, c);
+            }
+        }
+    }
+    if (y0 == SIZE_MAX) {
+        return {0, 0, 0, 0};
+    }
+    return {c0 * 8, y0, (c1 - c0 + 1) * 8, y1 - y0 + 1};
+}
+
+// Pinta `frame`. Con `previous` (lo que hay en el cristal) refresco parcial,
+// enviando sólo la zona que cambia si la RAM del controlador ya está al día;
+// sin él, completo.
 static void paint(const idfxx::epaper::mono_framebuffer &frame, const idfxx::epaper::mono_framebuffer *previous)
 {
-    idfxx::spi::bus_config bus_cfg{};
-    bus_cfg.mosi = idfxx::gpio_9;
-    bus_cfg.sclk = idfxx::gpio_7;
-    idfxx::spi::master_bus bus(idfxx::spi::host_device::spi2, idfxx::spi::dma_chan::ch_auto, bus_cfg);
-
-    idfxx::panel_io io(bus, idfxx::epaper::uc8179::spi_io_config(idfxx::gpio_10 /*CS*/, idfxx::gpio_11 /*DC*/));
-    idfxx::epaper::uc8179 display(io, {.reset_gpio = idfxx::gpio_12, .busy_gpio = idfxx::gpio_13});
-
-    auto mode = idfxx::epaper::refresh_mode::full;
-    if (previous != nullptr) {
-        display.restore_baseline(*previous);
-        mode = idfxx::epaper::refresh_mode::partial;
+    if (!panel) {
+        panel = std::make_unique<panel_session>();
     }
-    display.write(frame);
-    display.refresh(mode);
-    display.sleep();
+    auto &display = panel->display;
+    if (previous == nullptr) {
+        display.write(frame);
+        display.refresh(idfxx::epaper::refresh_mode::full);
+        panel->ram_matches_glass = true;
+        return;
+    }
+    if (!panel->ram_matches_glass) {
+        display.restore_baseline(*previous);  // RAM "anterior" = cristal
+        display.write(frame);
+    } else {
+        const region r = changed_region(*previous, frame);
+        if (r.h == 0) {
+            return;
+        }
+        // Copia de la zona en un framebuffer pequeño y escritura en su sitio
+        idfxx::epaper::mono_framebuffer part(r.w, r.h);
+        const size_t stride = frame.stride_bytes(), part_stride = part.stride_bytes();
+        const auto src = frame.data();
+        auto dst = part.data();
+        for (size_t y = 0; y < r.h; ++y) {
+            std::copy_n(src.begin() + (r.y + y) * stride + r.x / 8, part_stride, dst.begin() + y * part_stride);
+        }
+        display.write(part, r.x, r.y);
+    }
+    display.refresh(idfxx::epaper::refresh_mode::partial);
+    panel->ram_matches_glass = true;
 }
 
 // PSRAM detectada en bytes (0 = no hay o no se inicializó: modo equivocado,
@@ -1126,51 +1194,87 @@ static button wakeup_button()
     esp_deep_sleep_start();
 }
 
+// Lo que hay en el cristal, en RAM mientras dura la tanda de pintados.
+// frame.bin (y rtc.magic) sólo se ponen al día en end_painting(): escribir
+// 48 KB con fsync en cada pulsación haría lenta la respuesta.
+static std::optional<idfxx::epaper::mono_framebuffer> glass;
+static bool glass_unsaved;
+
+// Lo que hay en el cristal, si se sabe; si no, nullptr. Con mtx tomado.
+static const idfxx::epaper::mono_framebuffer *glass_frame(bool lfs)
+{
+    if (!glass && rtc.magic == RTC_MAGIC && lfs) {
+        glass.emplace(WIDTH, HEIGHT);
+        if (!load_frame(FRAME_PATH, *glass)) {
+            glass.reset();
+        }
+    }
+    return glass ? &*glass : nullptr;
+}
+
 // Pinta `frame` y lo apunta como lo que hay en el cristal. Con `previous` (lo
 // que hay ahora) refresco parcial; sin él, completo. `count_partial`: cuenta
 // para el límite de parciales seguidos (no los retoques pequeños de los
 // indicadores, que apenas dejan restos). Con mtx tomado.
-static void commit(bool lfs, const idfxx::epaper::mono_framebuffer &frame,
-                   const idfxx::epaper::mono_framebuffer *previous, bool count_partial)
+static void commit(const idfxx::epaper::mono_framebuffer &frame, const idfxx::epaper::mono_framebuffer *previous,
+                   bool count_partial)
 {
-    rtc.magic = 0;  // mientras se pinta, el cristal está en estado incierto
-    paint(frame, previous);
-    if (previous == nullptr) {
+    rtc.magic = 0;  // frame.bin ya no coincide con el cristal (y mientras se pinta, éste es incierto)
+    std::optional<idfxx::epaper::mono_framebuffer> before;
+    if (previous != nullptr) {
+        before = *previous;  // `previous` apunta a glass, que se invalida aquí
+    }
+    glass.reset();  // por si paint() falla: no se sabe qué ha quedado
+    paint(frame, before ? &*before : nullptr);
+    if (!before) {
         rtc.partials = 0;
         rtc.t_full = time(nullptr);
     } else if (count_partial) {
         rtc.partials++;
     }
-    if (lfs && save_frame(FRAME_PATH, frame)) {
-        rtc.magic = RTC_MAGIC;
+    glass = frame;
+    glass_unsaved = true;
+}
+
+// Fin de una tanda de pintados: duerme el panel y guarda el cristal en frame.bin.
+static void end_painting(bool lfs)
+{
+    xSemaphoreTake(mtx, portMAX_DELAY);
+    try {
+        if (panel) {
+            panel->display.sleep();
+            panel.reset();
+        }
+        if (glass_unsaved && glass && lfs && save_frame(FRAME_PATH, *glass)) {
+            rtc.magic = RTC_MAGIC;
+            glass_unsaved = false;
+        }
+    } catch (const std::exception &e) {
+        ESP_LOGE(TAG, "Error al dormir el panel: %s", e.what());
+        panel.reset();
     }
+    xSemaphoreGive(mtx);
 }
 
 // Retoca sólo los indicadores sobre lo que ya hay en el cristal, con un
 // refresco parcial: respuesta inmediata a un botón antes del trabajo lento.
-// Sin frame fiable del cristal no se hace nada (lo pintará show()).
+// Sin saber qué hay en el cristal no se hace nada (lo pintará show()).
 template <typename Draw>
 static void quick_update(bool lfs, Draw draw)
 {
     xSemaphoreTake(mtx, portMAX_DELAY);
     try {
-        std::optional<idfxx::epaper::mono_framebuffer> previous;
-        if (rtc.magic == RTC_MAGIC && lfs) {
-            previous.emplace(WIDTH, HEIGHT);
-            if (!load_frame(FRAME_PATH, *previous)) {
-                previous.reset();
-            }
-        }
-        if (previous && CONFIG_INDICATOR_HEIGHT > 0) {
+        const auto *previous = glass_frame(lfs);
+        if (previous != nullptr && CONFIG_INDICATOR_HEIGHT > 0) {
             idfxx::epaper::mono_framebuffer frame = *previous;
             draw(frame);
             if (!std::ranges::equal(previous->data(), frame.data())) {
-                commit(lfs, frame, &*previous, false);
+                commit(frame, previous, false);
             }
         }
     } catch (const std::exception &e) {
         ESP_LOGE(TAG, "Error: %s", e.what());
-        rtc.magic = 0;
+        panel.reset();
     }
     xSemaphoreGive(mtx);
 }
@@ -1182,14 +1286,7 @@ static void show(bool lfs, const char *notice, bool force)
 {
     xSemaphoreTake(mtx, portMAX_DELAY);
     try {
-        // Frame que hay en el cristal, si nos fiamos de él
-        std::optional<idfxx::epaper::mono_framebuffer> previous;
-        if (rtc.magic == RTC_MAGIC && lfs) {
-            previous.emplace(WIDTH, HEIGHT);
-            if (!load_frame(FRAME_PATH, *previous)) {
-                previous.reset();
-            }
-        }
+        const auto *previous = glass_frame(lfs);  // lo que hay en el cristal, si se sabe
 
         idfxx::epaper::mono_framebuffer frame(WIDTH, HEIGHT);
         std::optional<unsigned> sel;
@@ -1234,10 +1331,10 @@ static void show(bool lfs, const char *notice, bool force)
                      rtc.partials);
         }
 
-        commit(lfs, frame, partial ? &*previous : nullptr, true);
+        commit(frame, partial ? previous : nullptr, true);
     } catch (const std::exception &e) {
         ESP_LOGE(TAG, "Error: %s", e.what());
-        rtc.magic = 0;  // el próximo pintado será completo
+        panel.reset();  // el próximo pintado empieza de cero (y será completo: glass se borró)
     }
     xSemaphoreGive(mtx);
 }
@@ -1289,6 +1386,7 @@ static void handle_refresh(bool lfs)
         rtc.network = net_state::syncing;
         quick_update(lfs, [](idfxx::epaper::mono_framebuffer &frame) { draw_status(frame); });
     }
+    end_painting(lfs);  // el panel no se queda encendido mientras se conecta
     sync_mqtt();
     show(lfs, notice(), true);
     refresh_pending = false;
@@ -1343,6 +1441,7 @@ extern "C" void app_main()
     ESP_LOGW(TAG, "Modo pruebas: sin deep sleep");
     while (true) {
         handle_buttons(lfs, 0);
+        end_painting(lfs);
         // Hasta otra pulsación, una imagen nueva o un minuto (para seguir la batería)
         xEventGroupClearBits(events, BIT_PRESS);
         if (!press_pending()) {
@@ -1355,6 +1454,7 @@ extern "C" void app_main()
             wait_for_queue();
             update_battery();
             show(lfs, notice(), false);
+            end_painting(lfs);
         }
     }
 #else
@@ -1363,6 +1463,7 @@ extern "C" void app_main()
     // encendida esperando una pulsación que casi nunca llega), pero se atiende
     // lo que se haya pulsado mientras tanto.
     handle_buttons(lfs, b != button::none ? CONFIG_BUTTON_WINDOW_MS : 0);
+    end_painting(lfs);
     const bool released = wait_for_release();
     disconnect_network(mqtt_client);
     go_to_sleep(released);
