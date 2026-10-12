@@ -2,7 +2,7 @@
 // pensada para batería. Cada imagen es un mensaje retenido en su propio topic
 // (<MQTT_TOPIC_IMAGEN>/<índice>) y se guarda en LittleFS en su hueco; los
 // botones pasan a la anterior/siguiente sin conectarse a nada y el de refresco
-// descarga las nuevas. Cada CONFIG_INTERVALO_S el ESP32 despierta, recoge los
+// descarga las nuevas. Cada CONFIG_INTERVAL_S el ESP32 despierta, recoge los
 // cambios y vuelve a deep sleep; la pantalla sigue en la imagen seleccionada y
 // sólo se repinta si ésta ha cambiado.
 //
@@ -27,6 +27,7 @@
 
 #include <algorithm>
 #include <bitset>
+#include <cmath>
 #include <cstdio>
 #include <ctime>
 #include <exception>
@@ -54,27 +55,28 @@
 #include "freertos/semphr.h"
 #include "mqtt_client.h"
 #include "wifi.hpp"
+#include "battery.hpp"
 
 static const char *TAG = "epaper_mqtt";
 
 // Panel 7.5" 800x480 (valores por defecto de uc8179::config)
-static constexpr size_t ANCHO = 800;
-static constexpr size_t ALTO = 480;
+static constexpr size_t WIDTH = 800;
+static constexpr size_t HEIGHT = 480;
 
 // Pantallas de estado: spleen 8x16 a escala 3 -> 24x48 px por carácter
-static constexpr unsigned ESCALA = 3;
-static constexpr size_t MARGEN = 16;
+static constexpr unsigned TEXT_SCALE = 3;
+static constexpr size_t MARGIN = 16;
 // Payload: zlib de 800x480 a 1 bpp (48000 bytes). Comprimida no debería pasar
 // de esto ni en el peor caso (deflate añade poco a datos incompresibles).
-static constexpr size_t MAX_IMAGEN_Z = 64 * 1024;
-static constexpr unsigned MAX_IMAGENES = CONFIG_MAX_IMAGENES;
+static constexpr size_t MAX_COMPRESSED_SIZE = 64 * 1024;
+static constexpr unsigned MAX_IMAGES = CONFIG_MAX_IMAGES;
 
 // Botones (activos a nivel bajo, con pull-up en la placa)
-static constexpr gpio_num_t GPIO_ANTERIOR = static_cast<gpio_num_t>(CONFIG_BOTON_ANTERIOR_GPIO);
-static constexpr gpio_num_t GPIO_SIGUIENTE = static_cast<gpio_num_t>(CONFIG_BOTON_SIGUIENTE_GPIO);
-static constexpr gpio_num_t GPIO_REFRESCO = static_cast<gpio_num_t>(CONFIG_BOTON_REFRESCO_GPIO);
-static constexpr uint64_t MASCARA_BOTONES = (1ULL << GPIO_ANTERIOR) | (1ULL << GPIO_SIGUIENTE) | (1ULL << GPIO_REFRESCO);
-enum class boton { ninguno, anterior, siguiente, refresco };
+static constexpr gpio_num_t GPIO_PREV = static_cast<gpio_num_t>(CONFIG_BUTTON_PREV_GPIO);
+static constexpr gpio_num_t GPIO_NEXT = static_cast<gpio_num_t>(CONFIG_BUTTON_NEXT_GPIO);
+static constexpr gpio_num_t GPIO_REFRESH = static_cast<gpio_num_t>(CONFIG_BUTTON_REFRESH_GPIO);
+static constexpr uint64_t BUTTON_MASK = (1ULL << GPIO_PREV) | (1ULL << GPIO_NEXT) | (1ULL << GPIO_REFRESH);
+enum class button { none, previous, next, refresh };
 
 // ---------------------------------------------------------------------------
 // Estado que sobrevive al deep sleep (y a nada más: cualquier otro reset lo
@@ -82,28 +84,32 @@ enum class boton { ninguno, anterior, siguiente, refresco };
 // time(), que el RTC sigue contando durante el deep sleep.
 // ---------------------------------------------------------------------------
 static constexpr uint32_t RTC_MAGIC = 0x45504D51;
-struct estado_rtc {
+// Resultado de la última conexión (lo que muestra el icono de WiFi)
+enum class net_state : uint8_t { unknown, ok, no_wifi, no_broker };
+struct rtc_state {
     uint32_t magic;       // RTC_MAGIC = el frame guardado coincide con el cristal
-    uint32_t parciales;   // parciales desde el último completo
+    uint32_t partials;   // parciales desde el último completo
     time_t t_full;        // último refresco completo
-    time_t t_proxima;     // próxima comprobación de MQTT
+    time_t t_next_check;     // próxima comprobación de MQTT
+    net_state network;
+    int8_t battery;       // % que se muestra (múltiplo de 5), -1 = sin medida válida
 };
-RTC_DATA_ATTR static estado_rtc rtc;
+RTC_DATA_ATTR static rtc_state rtc;
 
 // ---------------------------------------------------------------------------
 // LittleFS: último frame pintado, imágenes por índice e índice seleccionado
 // ---------------------------------------------------------------------------
-static constexpr const char *RUTA_FRAME = "/lfs/frame.bin";
-static constexpr const char *RUTA_SEL = "/lfs/sel.bin";
+static constexpr const char *FRAME_PATH = "/lfs/frame.bin";
+static constexpr const char *SELECTION_PATH = "/lfs/sel.bin";
 // Filtro al que está suscrita la sesión del broker y número de huecos, escrito
 // tras una sincronización completa que terminó bien. Si falta o no coincide con
 // el de este firmware, el siguiente despertar vuelve a suscribirse.
-static constexpr const char *RUTA_SUSCRIPCION = "/lfs/sub.txt";
+static constexpr const char *SUBSCRIPTION_PATH = "/lfs/sub.txt";
 static constexpr uint32_t FRAME_MAGIC = 0x46524D31;  // "FRM1"
-struct cabecera_frame {
+struct frame_header {
     uint32_t magic;
-    uint16_t ancho;
-    uint16_t alto;
+    uint16_t width;
+    uint16_t height;
     uint32_t crc;
 };
 
@@ -111,7 +117,7 @@ struct cabecera_frame {
 // app_main puede estar pintando (sólo en modo pruebas o con botones).
 static SemaphoreHandle_t mtx;
 
-static bool montar_littlefs()
+static bool mount_littlefs()
 {
     esp_vfs_littlefs_conf_t conf{};
     conf.base_path = "/lfs";
@@ -125,78 +131,78 @@ static bool montar_littlefs()
     return true;
 }
 
-static std::string ruta_imagen(unsigned indice)
+static std::string image_path(unsigned index)
 {
-    char ruta[24];
-    snprintf(ruta, sizeof(ruta), "/lfs/img%03u.bin", indice);
-    return ruta;
+    char path[24];
+    snprintf(path, sizeof(path), "/lfs/img%03u.bin", index);
+    return path;
 }
 
-static bool existe_imagen(unsigned indice)
+static bool image_exists(unsigned index)
 {
-    return access(ruta_imagen(indice).c_str(), F_OK) == 0;
+    return access(image_path(index).c_str(), F_OK) == 0;
 }
 
-static bool cargar_frame(const char *ruta, idfxx::epaper::mono_framebuffer &fb)
+static bool load_frame(const char *path, idfxx::epaper::mono_framebuffer &fb)
 {
-    FILE *f = fopen(ruta, "rb");
+    FILE *f = fopen(path, "rb");
     if (f == nullptr) {
         return false;
     }
-    cabecera_frame cab{};
-    auto datos = fb.data();
-    bool ok = fread(&cab, sizeof(cab), 1, f) == 1 && cab.magic == FRAME_MAGIC && cab.ancho == fb.width() &&
-              cab.alto == fb.height() && fread(datos.data(), 1, datos.size(), f) == datos.size() &&
-              esp_rom_crc32_le(0, datos.data(), datos.size()) == cab.crc;
+    frame_header header{};
+    auto data = fb.data();
+    bool ok = fread(&header, sizeof(header), 1, f) == 1 && header.magic == FRAME_MAGIC && header.width == fb.width() &&
+              header.height == fb.height() && fread(data.data(), 1, data.size(), f) == data.size() &&
+              esp_rom_crc32_le(0, data.data(), data.size()) == header.crc;
     fclose(f);
     if (!ok) {
-        ESP_LOGW(TAG, "Frame inválido en %s", ruta);
+        ESP_LOGW(TAG, "Frame inválido en %s", path);
     }
     return ok;
 }
 
 // CRC de los datos de un frame guardado, leyendo sólo la cabecera.
-static std::optional<uint32_t> crc_guardado(const char *ruta)
+static std::optional<uint32_t> stored_crc(const char *path)
 {
-    FILE *f = fopen(ruta, "rb");
+    FILE *f = fopen(path, "rb");
     if (f == nullptr) {
         return std::nullopt;
     }
-    cabecera_frame cab{};
-    const bool ok = fread(&cab, sizeof(cab), 1, f) == 1 && cab.magic == FRAME_MAGIC && cab.ancho == ANCHO &&
-                    cab.alto == ALTO;
+    frame_header header{};
+    const bool ok = fread(&header, sizeof(header), 1, f) == 1 && header.magic == FRAME_MAGIC && header.width == WIDTH &&
+                    header.height == HEIGHT;
     fclose(f);
-    return ok ? std::optional(cab.crc) : std::nullopt;
+    return ok ? std::optional(header.crc) : std::nullopt;
 }
 
 // Escritura atómica: fichero temporal + rename, así un corte a mitad nunca deja
 // un frame a medias con apariencia de válido.
-static bool guardar_frame(const char *ruta, const idfxx::epaper::mono_framebuffer &fb)
+static bool save_frame(const char *path, const idfxx::epaper::mono_framebuffer &fb)
 {
-    auto datos = fb.data();
-    cabecera_frame cab{FRAME_MAGIC, static_cast<uint16_t>(fb.width()), static_cast<uint16_t>(fb.height()),
-                       esp_rom_crc32_le(0, datos.data(), datos.size())};
-    const std::string tmp = std::string(ruta) + ".tmp";
+    auto data = fb.data();
+    frame_header header{FRAME_MAGIC, static_cast<uint16_t>(fb.width()), static_cast<uint16_t>(fb.height()),
+                       esp_rom_crc32_le(0, data.data(), data.size())};
+    const std::string tmp = std::string(path) + ".tmp";
     FILE *f = fopen(tmp.c_str(), "wb");
     if (f == nullptr) {
         return false;
     }
-    bool ok = fwrite(&cab, sizeof(cab), 1, f) == 1 && fwrite(datos.data(), 1, datos.size(), f) == datos.size() &&
+    bool ok = fwrite(&header, sizeof(header), 1, f) == 1 && fwrite(data.data(), 1, data.size(), f) == data.size() &&
               fflush(f) == 0 && fsync(fileno(f)) == 0;
     ok = (fclose(f) == 0) && ok;
     if (ok) {
-        ok = rename(tmp.c_str(), ruta) == 0;
+        ok = rename(tmp.c_str(), path) == 0;
     }
     if (!ok) {
-        ESP_LOGE(TAG, "No se pudo guardar %s", ruta);
+        ESP_LOGE(TAG, "No se pudo guardar %s", path);
         remove(tmp.c_str());
     }
     return ok;
 }
 
-static int leer_seleccion()
+static int read_selection()
 {
-    FILE *f = fopen(RUTA_SEL, "rb");
+    FILE *f = fopen(SELECTION_PATH, "rb");
     if (f == nullptr) {
         return -1;
     }
@@ -206,61 +212,61 @@ static int leer_seleccion()
     return ok ? sel : -1;
 }
 
-static void guardar_seleccion(unsigned indice)
+static void save_selection(unsigned index)
 {
-    FILE *f = fopen(RUTA_SEL, "wb");
+    FILE *f = fopen(SELECTION_PATH, "wb");
     if (f == nullptr) {
         ESP_LOGE(TAG, "No se pudo guardar la selección");
         return;
     }
-    const uint8_t sel = indice;
+    const uint8_t sel = index;
     fwrite(&sel, 1, 1, f);
     fclose(f);
 }
 
 // Índice que hay que mostrar: el seleccionado si sigue existiendo; si no (se
 // borró o aún no había ninguno), el siguiente que exista.
-static std::optional<unsigned> seleccion()
+static std::optional<unsigned> selection()
 {
-    const int sel = leer_seleccion();
-    const unsigned inicio = (sel >= 0 && static_cast<unsigned>(sel) < MAX_IMAGENES) ? sel : 0;
-    for (unsigned i = 0; i < MAX_IMAGENES; ++i) {
-        const unsigned indice = (inicio + i) % MAX_IMAGENES;
-        if (existe_imagen(indice)) {
-            if (static_cast<int>(indice) != sel) {
-                guardar_seleccion(indice);
+    const int sel = read_selection();
+    const unsigned start = (sel >= 0 && static_cast<unsigned>(sel) < MAX_IMAGES) ? sel : 0;
+    for (unsigned i = 0; i < MAX_IMAGES; ++i) {
+        const unsigned index = (start + i) % MAX_IMAGES;
+        if (image_exists(index)) {
+            if (static_cast<int>(index) != sel) {
+                save_selection(index);
             }
-            return indice;
+            return index;
         }
     }
     return std::nullopt;
 }
 
 // Selecciona la imagen anterior (paso -1) o siguiente (+1) que exista, dando la vuelta.
-static void navegar(int paso)
+static void navigate(int step)
 {
-    const auto actual = seleccion();
-    if (!actual) {
+    const auto current = selection();
+    if (!current) {
         ESP_LOGI(TAG, "No hay imágenes guardadas");
         return;
     }
-    for (unsigned i = 1; i < MAX_IMAGENES; ++i) {
-        int indice = (static_cast<int>(*actual) + paso * static_cast<int>(i)) % static_cast<int>(MAX_IMAGENES);
-        if (indice < 0) {
-            indice += MAX_IMAGENES;
+    for (unsigned i = 1; i < MAX_IMAGES; ++i) {
+        int index = (static_cast<int>(*current) + step * static_cast<int>(i)) % static_cast<int>(MAX_IMAGES);
+        if (index < 0) {
+            index += MAX_IMAGES;
         }
-        if (existe_imagen(indice)) {
-            ESP_LOGI(TAG, "Imagen %u -> %d", *actual, indice);
-            guardar_seleccion(indice);
+        if (image_exists(index)) {
+            ESP_LOGI(TAG, "Imagen %u -> %d", *current, index);
+            save_selection(index);
             return;
         }
     }
-    ESP_LOGI(TAG, "Sólo hay una imagen (%u)", *actual);
+    ESP_LOGI(TAG, "Sólo hay una imagen (%u)", *current);
 }
 
-static std::string leer_suscripcion()
+static std::string read_subscription()
 {
-    FILE *f = fopen(RUTA_SUSCRIPCION, "rb");
+    FILE *f = fopen(SUBSCRIPTION_PATH, "rb");
     if (f == nullptr) {
         return {};
     }
@@ -270,14 +276,14 @@ static std::string leer_suscripcion()
     return std::string(buf, n);
 }
 
-static void guardar_suscripcion(const std::string &filtro)
+static void save_subscription(const std::string &filter)
 {
-    FILE *f = fopen(RUTA_SUSCRIPCION, "wb");
+    FILE *f = fopen(SUBSCRIPTION_PATH, "wb");
     if (f == nullptr) {
         ESP_LOGE(TAG, "No se pudo guardar la suscripción");
         return;
     }
-    fwrite(filtro.data(), 1, filtro.size(), f);
+    fwrite(filter.data(), 1, filter.size(), f);
     fclose(f);
 }
 
@@ -286,36 +292,194 @@ static void guardar_suscripcion(const std::string &filtro)
 // ---------------------------------------------------------------------------
 
 // Pantalla de estado: texto con '\n' como saltos de línea (sin ajuste por palabras).
-static void dibujar_texto(idfxx::epaper::mono_framebuffer &fb, const std::string &texto)
+static void draw_message(idfxx::epaper::mono_framebuffer &fb, const std::string &text)
 {
-    const auto &fuente = idfxx::font::spleen_8x16;
-    const size_t alto_char = fuente.height * ESCALA;
+    const auto &font = idfxx::font::spleen_8x16;
+    const size_t char_height = font.height * TEXT_SCALE;
     idfxx::gfx::canvas canvas(fb);
     canvas.clear();
-    size_t y = MARGEN;
-    for (size_t inicio = 0; inicio <= texto.size() && y + alto_char <= fb.height(); y += alto_char) {
-        size_t fin = std::min(texto.find('\n', inicio), texto.size());
-        canvas.draw_text(fuente, MARGEN, y, texto.substr(inicio, fin - inicio), true, ESCALA);
-        inicio = fin + 1;
+    size_t y = MARGIN;
+    for (size_t start = 0; start <= text.size() && y + char_height <= fb.height(); y += char_height) {
+        size_t end = std::min(text.find('\n', start), text.size());
+        canvas.draw_text(font, MARGIN, y, text.substr(start, end - start), true, TEXT_SCALE);
+        start = end + 1;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Indicadores superpuestos: "k/N" arriba a la izquierda; WiFi y batería arriba
+// a la derecha. Se dibujan en lo que se pinta, no en las imágenes guardadas, y
+// como forman parte del frame, cualquier cambio (otra imagen guardada, la red
+// cae o vuelve, la batería baja un escalón) hace que se repinte. Negro sobre un
+// recuadro blanco con borde, para que se lean sobre cualquier imagen.
+// ---------------------------------------------------------------------------
+static constexpr size_t INDICATOR_SCALE = CONFIG_INDICATOR_SCALE;
+
+// Recuadro blanco con borde negro de `grosor` px
+static void draw_box(idfxx::gfx::canvas<idfxx::epaper::mono_framebuffer> &canvas, size_t x, size_t y, size_t width,
+                     size_t height, size_t thickness)
+{
+    canvas.fill_rect(x, y, width, height, false);
+    for (size_t g = 0; g < thickness; ++g) {
+        canvas.draw_rect(x + g, y + g, width - 2 * g, height - 2 * g, true);
+    }
+}
+
+// Posición de `indice` entre las N imágenes guardadas (no el número de hueco)
+static void draw_position(idfxx::gfx::canvas<idfxx::epaper::mono_framebuffer> &canvas, unsigned index)
+{
+    unsigned position = 0, total = 0;
+    for (unsigned i = 0; i < MAX_IMAGES; ++i) {
+        if (image_exists(i)) {
+            ++total;
+            if (i <= index) {
+                ++position;
+            }
+        }
+    }
+    const std::string text = std::to_string(position) + "/" + std::to_string(total);
+    const auto &font = idfxx::font::spleen_8x16;
+    constexpr size_t padding = 2 * INDICATOR_SCALE;
+    draw_box(canvas, 0, 0, text.size() * font.width * INDICATOR_SCALE + 2 * padding,
+             font.height * INDICATOR_SCALE + 2 * padding, 1);
+    canvas.draw_text(font, padding, padding, text, true, INDICATOR_SCALE);
+}
+
+// Icono de WiFi (punto + 3 arcos) en un recuadro de ancho x alto que empieza
+// en (x0, y0). Tachado sin WiFi; con "!" si hay WiFi pero no broker.
+static void draw_wifi_icon(idfxx::epaper::mono_framebuffer &fb, size_t x0, size_t y0, size_t width, size_t height,
+                         net_state network)
+{
+    idfxx::gfx::canvas canvas(fb);
+    const float dot_radius = height * 0.12f;
+    const float cx = x0 + width / 2.0f;
+    const float cy = y0 + height - 1 - dot_radius;  // centro del punto y de los arcos
+    const float radius = cy - y0;               // radio del arco exterior
+    static constexpr float arcs[][2] = {{0.38f, 0.52f}, {0.62f, 0.76f}, {0.86f, 1.0f}};
+    for (size_t y = y0; y < y0 + height; ++y) {
+        for (size_t x = x0; x < x0 + width; ++x) {
+            const float dx = x - cx, dy = cy - y;
+            const float d = std::sqrt(dx * dx + dy * dy);
+            bool ink = d <= dot_radius;
+            if (dy > 0 && std::fabs(dx) <= dy) {  // cono de 90° hacia arriba
+                for (const auto &a : arcs) {
+                    ink = ink || (d >= a[0] * radius && d <= a[1] * radius);
+                }
+            }
+            if (ink) {
+                fb.set_pixel(x, y, true);
+            }
+        }
+    }
+    if (network == net_state::no_wifi) {
+        // Raya blanca ancha y negra encima: corta los arcos y se ve tachado
+        for (int pass = 0; pass < 2; ++pass) {
+            const int thickness = pass == 0 ? 2 * INDICATOR_SCALE : INDICATOR_SCALE / 2;
+            for (int k = -thickness; k <= thickness; ++k) {
+                const int xa = std::clamp(static_cast<int>(x0) + k, static_cast<int>(x0), static_cast<int>(x0 + width - 1));
+                const int xb = std::clamp(static_cast<int>(x0 + width - 1) + k, static_cast<int>(x0), static_cast<int>(x0 + width - 1));
+                canvas.draw_line(xa, y0, xb, y0 + height - 1, pass == 1);
+            }
+        }
+    } else if (network == net_state::no_broker) {
+        const auto &font = idfxx::font::spleen_5x8;
+        const size_t w = font.width * INDICATOR_SCALE, h = font.height * INDICATOR_SCALE;
+        canvas.fill_rect(x0 + width - w - 2, y0, w + 2, h + 1, false);
+        canvas.draw_text(font, x0 + width - w - 1, y0, "!", true, INDICATOR_SCALE);
+    }
+}
+
+// WiFi y batería en un recuadro arriba a la derecha
+static void draw_status(idfxx::epaper::mono_framebuffer &fb)
+{
+    const bool show_network = CONFIG_SHOW_NETWORK && rtc.network != net_state::unknown;
+    const bool show_battery = CONFIG_SHOW_BATTERY;
+    if (!show_network && !show_battery) {
+        return;
+    }
+    const auto &font = idfxx::font::spleen_8x16;
+    constexpr size_t e = INDICATOR_SCALE;
+    constexpr size_t padding = 2 * e;
+    const size_t height = font.height * e + 2 * padding;  // igual que el de "k/N"
+    const size_t icon_height = font.height * e;
+    const size_t icon_width = 2 * static_cast<size_t>(std::ceil(0.7072f * (icon_height * 0.88f))) + 1;
+    const size_t body_width = 4 * font.width * e + 4 * e;  // cabe "100%"
+    const size_t body_height = height - 2 * e;
+    constexpr size_t terminal_width = 2 * e, terminal_height = 6 * e;
+
+    size_t width = padding;
+    if (show_network) {
+        width += icon_width + padding;
+    }
+    if (show_battery) {
+        width += body_width + terminal_width + 2 * padding;  // el polo no pegado al borde
+    }
+    const size_t x0 = fb.width() - width;
+    idfxx::gfx::canvas canvas(fb);
+    draw_box(canvas, x0, 0, width, height, 1);
+
+    size_t x = x0 + padding;
+    if (show_network) {
+        draw_wifi_icon(fb, x, padding, icon_width, icon_height, rtc.network);
+        x += icon_width + padding;
+    }
+    if (show_battery) {
+        const size_t y = (height - body_height) / 2;
+        for (size_t g = 0; g < std::max<size_t>(1, e / 2); ++g) {
+            canvas.draw_rect(x + g, y + g, body_width - 2 * g, body_height - 2 * g, true);
+        }
+        canvas.fill_rect(x + body_width, (height - terminal_height) / 2, terminal_width, terminal_height, true);
+        const std::string text = rtc.battery >= 0 ? std::to_string(rtc.battery) + "%" : "?";
+        canvas.draw_text(font, x + (body_width - text.size() * font.width * e) / 2,
+                         y + (body_height - font.height * e) / 2, text, true, e);
+    }
+}
+
+static void draw_indicators(idfxx::epaper::mono_framebuffer &fb, std::optional<unsigned> sel)
+{
+    if (INDICATOR_SCALE == 0) {
+        return;
+    }
+    idfxx::gfx::canvas canvas(fb);
+    if (CONFIG_SHOW_POSITION && sel) {
+        draw_position(canvas, *sel);
+    }
+    draw_status(fb);
+}
+
+// Mide la batería y actualiza el % que se muestra, en escalones de 5 y con
+// histéresis: sólo cambia si la medida se aleja más de 3 puntos de lo que hay
+// en pantalla, para no repintar por el ruido de la medida (cada repintado
+// gasta batería y se nota).
+static void update_battery()
+{
+    if (!CONFIG_SHOW_BATTERY || INDICATOR_SCALE == 0) {
+        return;
+    }
+    const int pct = battery_percent(battery_mv());
+    if (pct < 0) {
+        rtc.battery = -1;
+    } else if (rtc.battery < 0 || std::abs(pct - rtc.battery) > 3) {
+        rtc.battery = static_cast<int8_t>((pct + 2) / 5 * 5);
     }
 }
 
 // Descomprime una imagen zlib directamente en el framebuffer. Falla si el
 // stream está corrupto (zlib lleva Adler-32) o no mide exactamente un frame.
-static bool descomprimir_imagen(std::string_view z, idfxx::epaper::mono_framebuffer &fb)
+static bool decompress_image(std::string_view z, idfxx::epaper::mono_framebuffer &fb)
 {
-    auto salida = fb.data();
+    auto out = fb.data();
     // El estado del descompresor (~11 KB) va al heap: no cabe en la pila
     auto dec = std::make_unique<tinfl_decompressor>();
     tinfl_init(dec.get());
     size_t len_in = z.size();
-    size_t len_out = salida.size();
+    size_t len_out = out.size();
     tinfl_status st = tinfl_decompress(dec.get(), reinterpret_cast<const mz_uint8 *>(z.data()), &len_in,
-                                       salida.data(), salida.data(), &len_out,
+                                       out.data(), out.data(), &len_out,
                                        TINFL_FLAG_PARSE_ZLIB_HEADER | TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF);
-    if (st != TINFL_STATUS_DONE || len_out != salida.size()) {
+    if (st != TINFL_STATUS_DONE || len_out != out.size()) {
         ESP_LOGE(TAG, "Imagen inválida (estado %d, %u bytes; se esperaban %u)", st, (unsigned)len_out,
-                 (unsigned)salida.size());
+                 (unsigned)out.size());
         return false;
     }
     return true;
@@ -332,7 +496,7 @@ static void sd_release_bus()
 
 // Pinta `nuevo`. Con `anterior` (lo que hay en el cristal) hace refresco
 // parcial; sin él, completo. Deja el panel en deep sleep.
-static void pintar(const idfxx::epaper::mono_framebuffer &nuevo, const idfxx::epaper::mono_framebuffer *anterior)
+static void paint(const idfxx::epaper::mono_framebuffer &frame, const idfxx::epaper::mono_framebuffer *previous)
 {
     idfxx::spi::bus_config bus_cfg{};
     bus_cfg.mosi = idfxx::gpio_9;
@@ -342,108 +506,108 @@ static void pintar(const idfxx::epaper::mono_framebuffer &nuevo, const idfxx::ep
     idfxx::panel_io io(bus, idfxx::epaper::uc8179::spi_io_config(idfxx::gpio_10 /*CS*/, idfxx::gpio_11 /*DC*/));
     idfxx::epaper::uc8179 display(io, {.reset_gpio = idfxx::gpio_12, .busy_gpio = idfxx::gpio_13});
 
-    auto modo = idfxx::epaper::refresh_mode::full;
-    if (anterior != nullptr) {
-        display.restore_baseline(*anterior);
-        modo = idfxx::epaper::refresh_mode::partial;
+    auto mode = idfxx::epaper::refresh_mode::full;
+    if (previous != nullptr) {
+        display.restore_baseline(*previous);
+        mode = idfxx::epaper::refresh_mode::partial;
     }
-    display.write(nuevo);
-    display.refresh(modo);
+    display.write(frame);
+    display.refresh(mode);
     display.sleep();
 }
 
 // ---------------------------------------------------------------------------
 // MQTT
 // ---------------------------------------------------------------------------
-static constexpr EventBits_t BIT_SUSCRITO = BIT0;
-static constexpr EventBits_t BIT_NUEVO = BIT1;  // se ha guardado o borrado alguna imagen
-static constexpr EventBits_t BIT_PUBLICADO = BIT2;  // PUBACK del estado
-static EventGroupHandle_t eventos;
-static std::string trozos;  // mensaje troceado en curso
-static bool trozos_validos;
-static int trozos_indice;  // hueco del mensaje en curso (-1 = topic que no es de imágenes)
-static volatile int64_t ultimo_evento_us;
-static volatile bool mqtt_conectado;
+static constexpr EventBits_t BIT_SUBSCRIBED = BIT0;
+static constexpr EventBits_t BIT_CHANGED = BIT1;  // se ha guardado o borrado alguna imagen
+static constexpr EventBits_t BIT_PUBLISHED = BIT2;  // PUBACK del estado
+static EventGroupHandle_t events;
+static std::string chunks;  // mensaje troceado en curso
+static bool chunks_valid;
+static int chunk_index;  // hueco del mensaje en curso (-1 = topic que no es de imágenes)
+static volatile int64_t last_event_us;
+static volatile bool mqtt_connected;
 
 // Sincronización completa en curso: huecos que han llegado desde la suscripción
 // (bajo mtx). Al terminar se borran los demás, que ya no están en el broker.
-static bool sincronizacion_completa;
-static bool suscripcion_rechazada;
-static std::bitset<MAX_IMAGENES> recibidos;
+static bool full_sync;
+static bool subscription_rejected;
+static std::bitset<MAX_IMAGES> received;
 
-static const std::string &filtro_imagenes()
+static const std::string &image_filter()
 {
-    static const std::string filtro = CONFIG_MQTT_TOPIC_IMAGEN "/+";
-    return filtro;
+    static const std::string filter = CONFIG_MQTT_IMAGE_TOPIC "/+";
+    return filter;
 }
 
 // Lo que se apunta en sub.txt: con más huecos hay índices que la sesión no ha
-// traído nunca (se ignoraban), así que cambiar MAX_IMAGENES obliga a resincronizar.
-static const std::string &firma_suscripcion()
+// traído nunca (se ignoraban), así que cambiar MAX_IMAGES obliga a resincronizar.
+static const std::string &subscription_signature()
 {
-    static const std::string firma = filtro_imagenes() + " " + std::to_string(MAX_IMAGENES);
-    return firma;
+    static const std::string signature = image_filter() + " " + std::to_string(MAX_IMAGES);
+    return signature;
 }
 
 // Índice de un topic <MQTT_TOPIC_IMAGEN>/<n>, o -1 si no lo es o se sale de rango.
-static int indice_del_topic(std::string_view topic)
+static int topic_index(std::string_view topic)
 {
-    constexpr std::string_view base = CONFIG_MQTT_TOPIC_IMAGEN "/";
+    constexpr std::string_view base = CONFIG_MQTT_IMAGE_TOPIC "/";
     if (!topic.starts_with(base) || topic.size() == base.size() || topic.size() > base.size() + 3) {
         return -1;
     }
-    const std::string_view numero = topic.substr(base.size());
-    if (numero.size() > 1 && numero[0] == '0') {
+    const std::string_view number = topic.substr(base.size());
+    if (number.size() > 1 && number[0] == '0') {
         return -1;  // "07" no es el hueco 7: un solo topic por hueco
     }
-    int indice = 0;
-    for (char c : numero) {
+    int index = 0;
+    for (char c : number) {
         if (c < '0' || c > '9') {
             return -1;
         }
-        indice = indice * 10 + (c - '0');
+        index = index * 10 + (c - '0');
     }
-    return indice < static_cast<int>(MAX_IMAGENES) ? indice : -1;
+    return index < static_cast<int>(MAX_IMAGES) ? index : -1;
 }
 
-#ifdef MQTT_CA_PROPIA
+#ifdef MQTT_CUSTOM_CA
 // main/certs/mqtt_ca.crt incrustado por CMake (EMBED_TXTFILES lo termina en '\0')
 extern const char mqtt_ca_pem[] asm("_binary_mqtt_ca_crt_start");
 #endif
 
 // Guarda la imagen de un mensaje completo en su hueco, o lo borra si el
 // payload está vacío (retenido borrado en el broker).
-static void guardar_recibida(unsigned indice, std::string_view payload)
+static void store_received(unsigned index, std::string_view payload)
 {
     xSemaphoreTake(mtx, portMAX_DELAY);
     try {
         if (payload.empty()) {
-            recibidos.set(indice);
-            if (remove(ruta_imagen(indice).c_str()) == 0) {
-                ESP_LOGI(TAG, "Borrada la imagen %u", indice);
-                xEventGroupSetBits(eventos, BIT_NUEVO);
+            received.set(index);
+            if (remove(image_path(index).c_str()) == 0) {
+                ESP_LOGI(TAG, "Borrada la imagen %u", index);
+                xEventGroupSetBits(events, BIT_CHANGED);
             }
         } else {
-            idfxx::epaper::mono_framebuffer fb(ANCHO, ALTO);
-            if (descomprimir_imagen(payload, fb)) {
-                recibidos.set(indice);
+            idfxx::epaper::mono_framebuffer fb(WIDTH, HEIGHT);
+            if (decompress_image(payload, fb)) {
+                received.set(index);
                 // En una sincronización completa llegan también las que no han
                 // cambiado: no se reescriben. Basta comparar el CRC de la
                 // cabecera (sin cargar otro framebuffer de 48 KB).
-                auto datos = fb.data();
-                if (crc_guardado(ruta_imagen(indice).c_str()) == esp_rom_crc32_le(0, datos.data(), datos.size())) {
-                    ESP_LOGI(TAG, "Imagen %u sin cambios", indice);
-                } else if (guardar_frame(ruta_imagen(indice).c_str(), fb)) {
-                    ESP_LOGI(TAG, "Guardada la imagen %u (%u bytes comprimida)", indice, (unsigned)payload.size());
-                    xEventGroupSetBits(eventos, BIT_NUEVO);
+                auto data = fb.data();
+                if (stored_crc(image_path(index).c_str()) == esp_rom_crc32_le(0, data.data(), data.size())) {
+                    ESP_LOGI(TAG, "Imagen %u sin cambios", index);
+                } else if (save_frame(image_path(index).c_str(), fb)) {
+                    ESP_LOGI(TAG, "Guardada la imagen %u (%u bytes comprimida)", index, (unsigned)payload.size());
+                    xEventGroupSetBits(events, BIT_CHANGED);
                 }
             }
         }
     } catch (const std::exception &e) {
-        ESP_LOGE(TAG, "No se pudo guardar la imagen %u: %s", indice, e.what());
+        ESP_LOGE(TAG, "No se pudo guardar la imagen %u: %s", index, e.what());
         // Sin memoria no se sabe si la imagen era válida: que la sincronización
         // completa no borre su hueco (se repetirá en el siguiente despertar)
-        sincronizacion_completa = false;
+        full_sync = false;
     }
     xSemaphoreGive(mtx);
 }
@@ -453,44 +617,47 @@ static void mqtt_event_handler(void *, esp_event_base_t, int32_t event_id, void 
     auto *event = static_cast<esp_mqtt_event_handle_t>(event_data);
     switch (static_cast<esp_mqtt_event_id_t>(event_id)) {
     case MQTT_EVENT_CONNECTED:
-        mqtt_conectado = true;
-        ultimo_evento_us = esp_timer_get_time();
-        if (event->session_present && leer_suscripcion() == firma_suscripcion()) {
+        mqtt_connected = true;
+        subscription_rejected = false;
+        last_event_us = esp_timer_get_time();
+        xEventGroupSetBits(events, BIT_CHANGED);  // modo pruebas: repintar el icono de red
+        if (event->session_present && read_subscription() == subscription_signature()) {
             // La suscripción sigue en el broker: sin volver a suscribirse sólo
             // llega lo publicado mientras dormía
             ESP_LOGI(TAG, "Sesión conservada en el broker: sólo cambios");
-            xEventGroupSetBits(eventos, BIT_SUSCRITO);
+            xEventGroupSetBits(events, BIT_SUBSCRIBED);
         } else {
-            ESP_LOGI(TAG, "Sincronización completa de %s (sesión previa: %d)", filtro_imagenes().c_str(),
+            ESP_LOGI(TAG, "Sincronización completa de %s (sesión previa: %d)", image_filter().c_str(),
                      event->session_present);
             xSemaphoreTake(mtx, portMAX_DELAY);
-            sincronizacion_completa = true;
-            recibidos.reset();
-            remove(RUTA_SUSCRIPCION);  // se vuelve a escribir sólo si esta termina bien
+            full_sync = true;
+            received.reset();
+            remove(SUBSCRIPTION_PATH);  // se vuelve a escribir sólo si esta termina bien
             xSemaphoreGive(mtx);
-            esp_mqtt_client_subscribe(event->client, filtro_imagenes().c_str(), 1);
+            esp_mqtt_client_subscribe(event->client, image_filter().c_str(), 1);
         }
         break;
     case MQTT_EVENT_DISCONNECTED:
-        mqtt_conectado = false;
+        mqtt_connected = false;
+        xEventGroupSetBits(events, BIT_CHANGED);  // modo pruebas: repintar el icono de red
         break;
     case MQTT_EVENT_SUBSCRIBED:
-        ultimo_evento_us = esp_timer_get_time();
+        last_event_us = esp_timer_get_time();
         // esp-mqtt avisa también de un SUBACK rechazado (0x80, p. ej. sin
         // permiso de lectura en el ACL): sin suscripción no llegaría nada y la
         // sincronización completa borraría todas las imágenes.
         if (event->error_handle->error_type == MQTT_ERROR_TYPE_SUBSCRIBE_FAILED) {
-            ESP_LOGE(TAG, "El broker rechaza la suscripción a %s (¿permiso de lectura?)", filtro_imagenes().c_str());
+            ESP_LOGE(TAG, "El broker rechaza la suscripción a %s (¿permiso de lectura?)", image_filter().c_str());
             xSemaphoreTake(mtx, portMAX_DELAY);
-            sincronizacion_completa = false;
-            suscripcion_rechazada = true;
-            remove(RUTA_SUSCRIPCION);
+            full_sync = false;
+            subscription_rejected = true;
+            remove(SUBSCRIPTION_PATH);
             xSemaphoreGive(mtx);
         }
-        xEventGroupSetBits(eventos, BIT_SUSCRITO);
+        xEventGroupSetBits(events, BIT_SUBSCRIBED);
         break;
     case MQTT_EVENT_PUBLISHED:
-        xEventGroupSetBits(eventos, BIT_PUBLICADO);
+        xEventGroupSetBits(events, BIT_PUBLISHED);
         break;
     case MQTT_EVENT_DATA:
         // Los mensajes grandes llegan troceados: se reensamblan aquí. El topic
@@ -498,37 +665,37 @@ static void mqtt_event_handler(void *, esp_event_base_t, int32_t event_id, void 
         // salir al código C de esp-mqtt: abortaría.
         try {
             if (event->current_data_offset == 0) {
-                trozos.clear();
-                trozos_indice = indice_del_topic(std::string_view(event->topic, event->topic_len));
-                trozos_validos = trozos_indice >= 0 && static_cast<size_t>(event->total_data_len) <= MAX_IMAGEN_Z;
-                if (trozos_indice < 0) {
+                chunks.clear();
+                chunk_index = topic_index(std::string_view(event->topic, event->topic_len));
+                chunks_valid = chunk_index >= 0 && static_cast<size_t>(event->total_data_len) <= MAX_COMPRESSED_SIZE;
+                if (chunk_index < 0) {
                     ESP_LOGW(TAG, "Mensaje en %.*s ignorado (fuera de %s, o índice >= %u)", event->topic_len,
-                             event->topic, filtro_imagenes().c_str(), MAX_IMAGENES);
-                } else if (!trozos_validos) {
+                             event->topic, image_filter().c_str(), MAX_IMAGES);
+                } else if (!chunks_valid) {
                     ESP_LOGW(TAG, "Mensaje de %d bytes ignorado (máx %u)", event->total_data_len,
-                             (unsigned)MAX_IMAGEN_Z);
+                             (unsigned)MAX_COMPRESSED_SIZE);
                 }
-                if (trozos_validos) {
-                    trozos.reserve(event->total_data_len);
+                if (chunks_valid) {
+                    chunks.reserve(event->total_data_len);
                 }
             }
-            if (trozos_validos) {
-                trozos.append(event->data, event->data_len);
-                if (static_cast<int>(trozos.size()) == event->total_data_len) {
-                    trozos_validos = false;
-                    guardar_recibida(trozos_indice, trozos);
-                    std::string().swap(trozos);  // libera los hasta 64 KB
+            if (chunks_valid) {
+                chunks.append(event->data, event->data_len);
+                if (static_cast<int>(chunks.size()) == event->total_data_len) {
+                    chunks_valid = false;
+                    store_received(chunk_index, chunks);
+                    std::string().swap(chunks);  // libera los hasta 64 KB
                 }
             }
         } catch (const std::exception &e) {
             ESP_LOGE(TAG, "Mensaje descartado: %s", e.what());
-            trozos_validos = false;
-            std::string().swap(trozos);
+            chunks_valid = false;
+            std::string().swap(chunks);
             xSemaphoreTake(mtx, portMAX_DELAY);
-            sincronizacion_completa = false;  // ver guardar_recibida()
+            full_sync = false;  // ver store_received()
             xSemaphoreGive(mtx);
         }
-        ultimo_evento_us = esp_timer_get_time();
+        last_event_us = esp_timer_get_time();
         break;
     case MQTT_EVENT_ERROR: {
         const auto *e = event->error_handle;
@@ -552,10 +719,10 @@ static void mqtt_event_handler(void *, esp_event_base_t, int32_t event_id, void 
 // Conecta WiFi + MQTT y espera a la suscripción. El client_id fijo y la
 // sesión persistente hacen que el broker guarde en cola los mensajes QoS 1
 // publicados mientras dormimos (ver el comentario del principio).
-static esp_mqtt_client_handle_t conectar(bool &conectado)
+static esp_mqtt_client_handle_t connect_network(bool &connected)
 {
-    conectado = false;
-    if (!wifi_conectar()) {
+    connected = false;
+    if (!wifi_connect()) {
         return nullptr;
     }
 
@@ -569,15 +736,15 @@ static esp_mqtt_client_handle_t conectar(bool &conectado)
     // TLS (sólo cuenta con mqtts://): la CA propia de main/certs/ si se compiló con ella,
     // si no, el bundle de CAs públicas. El host del URI tiene que estar en el certificado
     // (CN o SAN; vale una IP si el SAN la incluye).
-#ifdef MQTT_CA_PROPIA
+#ifdef MQTT_CUSTOM_CA
     mqtt_cfg.broker.verification.certificate = mqtt_ca_pem;
 #else
     mqtt_cfg.broker.verification.crt_bundle_attach = esp_crt_bundle_attach;
 #endif
     mqtt_cfg.credentials.client_id = client_id;
-    if (CONFIG_MQTT_USUARIO[0] != '\0') {
-        mqtt_cfg.credentials.username = CONFIG_MQTT_USUARIO;
-        mqtt_cfg.credentials.authentication.password = CONFIG_MQTT_CLAVE;
+    if (CONFIG_MQTT_USERNAME[0] != '\0') {
+        mqtt_cfg.credentials.username = CONFIG_MQTT_USERNAME;
+        mqtt_cfg.credentials.authentication.password = CONFIG_MQTT_PASSWORD;
     }
     mqtt_cfg.session.disable_clean_session = true;
     mqtt_cfg.buffer.size = 4096;  // menos trozos al recibir imágenes
@@ -585,71 +752,71 @@ static esp_mqtt_client_handle_t conectar(bool &conectado)
     esp_mqtt_client_register_event(client, MQTT_EVENT_ANY, mqtt_event_handler, nullptr);
     esp_mqtt_client_start(client);
 
-    conectado = (xEventGroupWaitBits(eventos, BIT_SUSCRITO, pdFALSE, pdTRUE,
-                                     pdMS_TO_TICKS(CONFIG_TIMEOUT_CONEXION_S * 1000)) & BIT_SUSCRITO) &&
-                !suscripcion_rechazada;
-    if (!conectado) {
+    connected = (xEventGroupWaitBits(events, BIT_SUBSCRIBED, pdFALSE, pdTRUE,
+                                     pdMS_TO_TICKS(CONFIG_CONNECT_TIMEOUT_S * 1000)) & BIT_SUBSCRIBED) &&
+                !subscription_rejected;
+    if (!connected) {
         ESP_LOGE(TAG, "No se pudo conectar/suscribir al broker");
     }
     return client;
 }
 
 // Seguro de llamar aunque no se haya intentado conectar (despertar por botón).
-[[maybe_unused]] static void desconectar(esp_mqtt_client_handle_t client)
+[[maybe_unused]] static void disconnect_network(esp_mqtt_client_handle_t client)
 {
     if (client != nullptr) {
         esp_mqtt_client_stop(client);
         esp_mqtt_client_destroy(client);
     }
-    wifi_desconectar();
+    wifi_disconnect();
 }
 
 // Cierra una sincronización completa: borra los huecos que no han llegado (ya
 // no están retenidos en el broker) y apunta la suscripción, para que los
 // siguientes despertares se fíen de la sesión. Si se ha cortado la conexión a
 // mitad no se hace nada y el siguiente despertar vuelve a empezar.
-static void terminar_sincronizacion()
+static void finish_sync()
 {
     xSemaphoreTake(mtx, portMAX_DELAY);
-    if (sincronizacion_completa && mqtt_conectado) {
-        sincronizacion_completa = false;
-        for (unsigned i = 0; i < MAX_IMAGENES; ++i) {
-            if (!recibidos.test(i) && remove(ruta_imagen(i).c_str()) == 0) {
+    if (full_sync && mqtt_connected) {
+        full_sync = false;
+        for (unsigned i = 0; i < MAX_IMAGES; ++i) {
+            if (!received.test(i) && remove(image_path(i).c_str()) == 0) {
                 ESP_LOGI(TAG, "Borrada la imagen %u (ya no está en el broker)", i);
-                xEventGroupSetBits(eventos, BIT_NUEVO);
+                xEventGroupSetBits(events, BIT_CHANGED);
             }
         }
-        guardar_suscripcion(firma_suscripcion());
-        ESP_LOGI(TAG, "Sincronización completa terminada (%u imágenes)", (unsigned)recibidos.count());
+        save_subscription(subscription_signature());
+        ESP_LOGI(TAG, "Sincronización completa terminada (%u imágenes)", (unsigned)received.count());
     }
     xSemaphoreGive(mtx);
 }
 
 // Espera hasta que pase VENTANA_MS sin mensajes (la cola ya se ha vaciado).
-static void esperar_cola()
+static void wait_for_queue()
 {
-    while (esp_timer_get_time() - ultimo_evento_us < CONFIG_VENTANA_MS * 1000LL) {
+    while (esp_timer_get_time() - last_event_us < CONFIG_QUEUE_WINDOW_MS * 1000LL) {
         vTaskDelay(pdMS_TO_TICKS(100));
     }
-    terminar_sincronizacion();
-    xEventGroupClearBits(eventos, BIT_NUEVO);
+    finish_sync();
+    xEventGroupClearBits(events, BIT_CHANGED);
 }
 
-static const char *causa_despertar = "arranque";
+static const char *wakeup_cause = "arranque";
 
 // Publica (retenido) el estado del dispositivo en MQTT_TOPIC_ESTADO y espera
 // el PUBACK, para que no se pierda al desconectar justo después.
-static void publicar_estado(esp_mqtt_client_handle_t client)
+static void publish_status(esp_mqtt_client_handle_t client)
 {
-    if (CONFIG_MQTT_TOPIC_ESTADO[0] == '\0') {
+    if (CONFIG_MQTT_STATUS_TOPIC[0] == '\0') {
         return;
     }
-    std::string imagenes;
+    std::string images;
     xSemaphoreTake(mtx, portMAX_DELAY);
-    const auto sel = seleccion();
-    for (unsigned i = 0; i < MAX_IMAGENES; ++i) {
-        if (existe_imagen(i)) {
-            imagenes += (imagenes.empty() ? "" : ",") + std::to_string(i);
+    const auto sel = selection();
+    for (unsigned i = 0; i < MAX_IMAGES; ++i) {
+        if (image_exists(i)) {
+            images += (images.empty() ? "" : ",") + std::to_string(i);
         }
     }
     xSemaphoreGive(mtx);
@@ -659,86 +826,96 @@ static void publicar_estado(esp_mqtt_client_handle_t client)
     char json[256];
     snprintf(json, sizeof(json),
              R"({"firmware":"%s","despertar":"%s","seleccion":%d,"imagenes":[%s],"rssi":%d,"despierto_ms":%lld})",
-             esp_app_get_description()->version, causa_despertar, sel ? static_cast<int>(*sel) : -1,
-             imagenes.c_str(), rssi, esp_timer_get_time() / 1000);
-    xEventGroupClearBits(eventos, BIT_PUBLICADO);
-    if (esp_mqtt_client_publish(client, CONFIG_MQTT_TOPIC_ESTADO, json, 0, 1, 1) < 0 ||
-        !(xEventGroupWaitBits(eventos, BIT_PUBLICADO, pdTRUE, pdTRUE, pdMS_TO_TICKS(3000)) & BIT_PUBLICADO)) {
+             esp_app_get_description()->version, wakeup_cause, sel ? static_cast<int>(*sel) : -1,
+             images.c_str(), rssi, esp_timer_get_time() / 1000);
+    xEventGroupClearBits(events, BIT_PUBLISHED);
+    if (esp_mqtt_client_publish(client, CONFIG_MQTT_STATUS_TOPIC, json, 0, 1, 1) < 0 ||
+        !(xEventGroupWaitBits(events, BIT_PUBLISHED, pdTRUE, pdTRUE, pdMS_TO_TICKS(3000)) & BIT_PUBLISHED)) {
         ESP_LOGW(TAG, "No se pudo publicar el estado");
     }
 }
 
 // Conexión de este despertar: se abre la primera vez que hace falta (un solo
 // intento) y se mantiene hasta dormir.
-static esp_mqtt_client_handle_t cliente;
-static bool intentado, conectado;
+static esp_mqtt_client_handle_t mqtt_client;
+static bool attempted, connected;
 
-static void sincronizar()
+// Estado de la red ahora mismo. "ok" = suscrito al broker: lo que importa es
+// poder recibir imágenes, no sólo tener WiFi.
+static net_state current_network()
 {
-    rtc.t_proxima = time(nullptr) + CONFIG_INTERVALO_S;
-    if (!intentado) {
-        intentado = true;
-        cliente = conectar(conectado);
+    if (!wifi_connected()) {
+        return net_state::no_wifi;
     }
-    if (conectado) {
-        esperar_cola();
-        publicar_estado(cliente);
+    return mqtt_connected && !subscription_rejected ? net_state::ok : net_state::no_broker;
+}
+
+static void sync_mqtt()
+{
+    rtc.t_next_check = time(nullptr) + CONFIG_INTERVAL_S;
+    if (!attempted) {
+        attempted = true;
+        mqtt_client = connect_network(connected);
+    }
+    if (connected) {
+        wait_for_queue();
+        publish_status(mqtt_client);
     }
 }
 
 // ---------------------------------------------------------------------------
 // Botones
 // ---------------------------------------------------------------------------
-static void configurar_botones()
+static void setup_buttons()
 {
     gpio_config_t cfg{};
-    cfg.pin_bit_mask = MASCARA_BOTONES;
+    cfg.pin_bit_mask = BUTTON_MASK;
     cfg.mode = GPIO_MODE_INPUT;  // pull-up externo
     gpio_config(&cfg);
 }
 
-static boton leer_botones()
+static button read_buttons()
 {
-    if (gpio_get_level(GPIO_ANTERIOR) == 0) {
-        return boton::anterior;
+    if (gpio_get_level(GPIO_PREV) == 0) {
+        return button::previous;
     }
-    if (gpio_get_level(GPIO_SIGUIENTE) == 0) {
-        return boton::siguiente;
+    if (gpio_get_level(GPIO_NEXT) == 0) {
+        return button::next;
     }
-    if (gpio_get_level(GPIO_REFRESCO) == 0) {
-        return boton::refresco;
+    if (gpio_get_level(GPIO_REFRESH) == 0) {
+        return button::refresh;
     }
-    return boton::ninguno;
+    return button::none;
 }
 
 // Botón pulsado (estable 30 ms) antes de `timeout_ms`; en modo pruebas
 // también vuelve, con ninguno, si llega una imagen.
-static boton esperar_boton(int64_t timeout_ms)
+static button wait_for_button(int64_t timeout_ms)
 {
-    const int64_t fin = esp_timer_get_time() + timeout_ms * 1000;
-    while (esp_timer_get_time() < fin) {
-        boton b = leer_botones();
-        if (b != boton::ninguno) {
+    const int64_t end = esp_timer_get_time() + timeout_ms * 1000;
+    while (esp_timer_get_time() < end) {
+        button b = read_buttons();
+        if (b != button::none) {
             vTaskDelay(pdMS_TO_TICKS(30));
-            if (leer_botones() == b) {
+            if (read_buttons() == b) {
                 return b;
             }
         }
-#if CONFIG_SIN_DEEP_SLEEP
-        if (xEventGroupGetBits(eventos) & BIT_NUEVO) {
-            return boton::ninguno;
+#if CONFIG_NO_DEEP_SLEEP
+        if (xEventGroupGetBits(events) & BIT_CHANGED) {
+            return button::none;
         }
 #endif
         vTaskDelay(pdMS_TO_TICKS(20));
     }
-    return boton::ninguno;
+    return button::none;
 }
 
 // Espera a que se suelten todos los botones; false si alguno sigue pulsado.
-static bool esperar_suelta()
+static bool wait_for_release()
 {
     for (int i = 0; i < 250; ++i) {  // 5 s
-        if (leer_botones() == boton::ninguno) {
+        if (read_buttons() == button::none) {
             return true;
         }
         vTaskDelay(pdMS_TO_TICKS(20));
@@ -748,31 +925,31 @@ static bool esperar_suelta()
 }
 
 // Botón que ha despertado al ESP32, si ha sido uno.
-static boton boton_del_despertar()
+static button wakeup_button()
 {
     if (!(esp_sleep_get_wakeup_causes() & BIT(ESP_SLEEP_WAKEUP_EXT1))) {
-        return boton::ninguno;
+        return button::none;
     }
-    const uint64_t pines = esp_sleep_get_ext1_wakeup_status();
-    if (pines & (1ULL << GPIO_ANTERIOR)) {
-        return boton::anterior;
+    const uint64_t pins = esp_sleep_get_ext1_wakeup_status();
+    if (pins & (1ULL << GPIO_PREV)) {
+        return button::previous;
     }
-    if (pines & (1ULL << GPIO_SIGUIENTE)) {
-        return boton::siguiente;
+    if (pins & (1ULL << GPIO_NEXT)) {
+        return button::next;
     }
-    return boton::refresco;
+    return button::refresh;
 }
 
 // ---------------------------------------------------------------------------
 
-[[maybe_unused, noreturn]] static void dormir(bool con_botones)
+[[maybe_unused, noreturn]] static void go_to_sleep(bool wake_on_buttons)
 {
-    const time_t ahora = time(nullptr);
-    const time_t espera = std::max<time_t>(rtc.t_proxima - ahora, 1);
-    ESP_LOGI(TAG, "Despierto %lld ms; a deep sleep %lld s", esp_timer_get_time() / 1000, (long long)espera);
-    esp_sleep_enable_timer_wakeup(static_cast<uint64_t>(espera) * 1000000ULL);
-    if (con_botones) {
-        esp_sleep_enable_ext1_wakeup_io(MASCARA_BOTONES, ESP_EXT1_WAKEUP_ANY_LOW);
+    const time_t now = time(nullptr);
+    const time_t sleep_s = std::max<time_t>(rtc.t_next_check - now, 1);
+    ESP_LOGI(TAG, "Despierto %lld ms; a deep sleep %lld s", esp_timer_get_time() / 1000, (long long)sleep_s);
+    esp_sleep_enable_timer_wakeup(static_cast<uint64_t>(sleep_s) * 1000000ULL);
+    if (wake_on_buttons) {
+        esp_sleep_enable_ext1_wakeup_io(BUTTON_MASK, ESP_EXT1_WAKEUP_ANY_LOW);
     }
     esp_deep_sleep_start();
 }
@@ -780,62 +957,66 @@ static boton boton_del_despertar()
 // Pinta la imagen seleccionada si no es lo que ya hay en el cristal. Si no hay
 // ninguna guardada pinta `aviso` (si lo hay). `forzar` = refresco completo
 // aunque no haya cambios (limpia los restos de los parciales).
-static void mostrar(bool lfs, const char *aviso, bool forzar)
+static void show(bool lfs, const char *notice, bool force)
 {
     xSemaphoreTake(mtx, portMAX_DELAY);
     try {
         // Frame que hay en el cristal, si nos fiamos de él
-        std::optional<idfxx::epaper::mono_framebuffer> anterior;
+        std::optional<idfxx::epaper::mono_framebuffer> previous;
         if (rtc.magic == RTC_MAGIC && lfs) {
-            anterior.emplace(ANCHO, ALTO);
-            if (!cargar_frame(RUTA_FRAME, *anterior)) {
-                anterior.reset();
+            previous.emplace(WIDTH, HEIGHT);
+            if (!load_frame(FRAME_PATH, *previous)) {
+                previous.reset();
             }
         }
 
-        idfxx::epaper::mono_framebuffer nuevo(ANCHO, ALTO);
+        idfxx::epaper::mono_framebuffer frame(WIDTH, HEIGHT);
         std::optional<unsigned> sel;
-        bool hay_imagen = false;
-        while (lfs && !hay_imagen && (sel = seleccion())) {
-            hay_imagen = cargar_frame(ruta_imagen(*sel).c_str(), nuevo);
-            if (!hay_imagen) {
+        bool has_image = false;
+        while (lfs && !has_image && (sel = selection())) {
+            has_image = load_frame(image_path(*sel).c_str(), frame);
+            if (!has_image) {
                 // Corrupta: se borra y se pasa a la siguiente. Sin sub.txt, la
                 // próxima conexión hace una sincronización completa y la recupera
                 // del broker si sigue retenida.
-                remove(ruta_imagen(*sel).c_str());
-                remove(RUTA_SUSCRIPCION);
+                remove(image_path(*sel).c_str());
+                remove(SUBSCRIPTION_PATH);
             }
         }
-        if (!hay_imagen) {
-            if (aviso == nullptr) {
+        if (attempted) {
+            rtc.network = current_network();  // con conexión abierta en este despertar, su estado real
+        }
+        draw_indicators(frame, has_image ? sel : std::nullopt);
+        if (!has_image) {
+            if (notice == nullptr) {
                 xSemaphoreGive(mtx);
                 return;
             }
-            dibujar_texto(nuevo, aviso);
+            draw_message(frame, notice);
         }
-        if (!forzar && anterior && std::ranges::equal(anterior->data(), nuevo.data())) {
+        if (!force && previous && std::ranges::equal(previous->data(), frame.data())) {
             ESP_LOGI(TAG, "Sin cambios en la imagen, no se refresca");
             xSemaphoreGive(mtx);
             return;
         }
 
-        const time_t ahora = time(nullptr);
-        const bool parcial = !forzar && anterior && rtc.parciales < CONFIG_PARCIALES_MAX &&
-                             ahora - rtc.t_full < CONFIG_FULL_CADA_H * 3600;
-        if (hay_imagen) {
-            ESP_LOGI(TAG, "Imagen %u, refresco %s (parciales=%" PRIu32 ")", *sel, parcial ? "parcial" : "completo",
-                     rtc.parciales);
+        const time_t now = time(nullptr);
+        const bool partial = !force && previous && rtc.partials < CONFIG_MAX_PARTIALS &&
+                             now - rtc.t_full < CONFIG_FULL_REFRESH_H * 3600;
+        if (has_image) {
+            ESP_LOGI(TAG, "Imagen %u, refresco %s (parciales=%" PRIu32 ")", *sel, partial ? "parcial" : "completo",
+                     rtc.partials);
         }
 
         rtc.magic = 0;  // mientras se pinta, el cristal está en estado incierto
-        pintar(nuevo, parcial ? &*anterior : nullptr);
-        if (parcial) {
-            rtc.parciales++;
+        paint(frame, partial ? &*previous : nullptr);
+        if (partial) {
+            rtc.partials++;
         } else {
-            rtc.parciales = 0;
-            rtc.t_full = ahora;
+            rtc.partials = 0;
+            rtc.t_full = now;
         }
-        if (lfs && guardar_frame(RUTA_FRAME, nuevo)) {
+        if (lfs && save_frame(FRAME_PATH, frame)) {
             rtc.magic = RTC_MAGIC;
         }
     } catch (const std::exception &e) {
@@ -845,30 +1026,30 @@ static void mostrar(bool lfs, const char *aviso, bool forzar)
     xSemaphoreGive(mtx);
 }
 
-static const char *aviso()
+static const char *notice()
 {
-    static const std::string sin_conexion = "Sin conexion.\nReintentando cada " + std::to_string(CONFIG_INTERVALO_S) + " s";
-    return conectado ? "Esperando imagenes en\n" CONFIG_MQTT_TOPIC_IMAGEN "/<n>" : sin_conexion.c_str();
+    static const std::string offline_text = "Sin conexion.\nReintentando cada " + std::to_string(CONFIG_INTERVAL_S) + " s";
+    return connected ? "Esperando imagenes en\n" CONFIG_MQTT_IMAGE_TOPIC "/<n>" : offline_text.c_str();
 }
 
 // Anterior/siguiente: sólo cambia de imagen, sin red. Refresco (y despertar
 // por tiempo o arranque, `ninguno`): recoge la cola MQTT y pinta la seleccionada.
-static void atender(boton b, bool lfs)
+static void handle_button(button b, bool lfs)
 {
     switch (b) {
-    case boton::anterior:
-    case boton::siguiente:
-        navegar(b == boton::anterior ? -1 : 1);
-        mostrar(lfs, nullptr, false);
+    case button::previous:
+    case button::next:
+        navigate(b == button::previous ? -1 : 1);
+        show(lfs, nullptr, false);
         break;
-    case boton::refresco:
+    case button::refresh:
         ESP_LOGI(TAG, "Botón de refresco");
-        sincronizar();
-        mostrar(lfs, aviso(), true);
+        sync_mqtt();
+        show(lfs, notice(), true);
         break;
-    case boton::ninguno:
-        sincronizar();
-        mostrar(lfs, aviso(), false);
+    case button::none:
+        sync_mqtt();
+        show(lfs, notice(), false);
         break;
     }
 }
@@ -876,48 +1057,50 @@ static void atender(boton b, bool lfs)
 extern "C" void app_main()
 {
     sd_release_bus();
-    configurar_botones();
-    eventos = xEventGroupCreate();
+    setup_buttons();
+    events = xEventGroupCreate();
     mtx = xSemaphoreCreateMutex();
 
     if (esp_reset_reason() != ESP_RST_DEEPSLEEP) {
         rtc = {};  // arranque en frío, flasheo, crash...: no sabemos qué hay en el cristal
     }
-    const bool lfs = montar_littlefs();
+    const bool lfs = mount_littlefs();
+    update_battery();  // antes de encender la WiFi: sin la caída de tensión al transmitir
 
     // Si despierta un botón de navegación no se toca la red; la comprobación
-    // de MQTT sigue programada para rtc.t_proxima (ver dormir()).
-    boton b = boton_del_despertar();
-    if (b != boton::ninguno) {
-        causa_despertar = "boton";
+    // de MQTT sigue programada para rtc.t_next_check (ver dormir()).
+    button b = wakeup_button();
+    if (b != button::none) {
+        wakeup_cause = "boton";
     } else if (esp_sleep_get_wakeup_causes() & BIT(ESP_SLEEP_WAKEUP_TIMER)) {
-        causa_despertar = "temporizador";
+        wakeup_cause = "temporizador";
     }
-    atender(b, lfs);
+    handle_button(b, lfs);
 
-#if CONFIG_SIN_DEEP_SLEEP
+#if CONFIG_NO_DEEP_SLEEP
     // Modo pruebas: seguir conectado, pintar cada imagen según llega y atender los botones
     ESP_LOGW(TAG, "Modo pruebas: sin deep sleep");
     while (true) {
-        esperar_suelta();
-        b = esperar_boton(INT32_MAX);
-        if (b == boton::ninguno) {
-            esperar_cola();
-            mostrar(lfs, aviso(), false);
+        wait_for_release();
+        b = wait_for_button(60000);  // como mucho cada minuto, para seguir la batería
+        if (b == button::none) {
+            wait_for_queue();
+            update_battery();
+            show(lfs, notice(), false);
         } else {
-            atender(b, lfs);
+            handle_button(b, lfs);
         }
     }
 #else
     // Si ha despertado un botón, unos segundos para seguir pasando imágenes sin
     // volver a despertar. Tras un despertar por tiempo no: sería radio encendida
     // esperando una pulsación que casi nunca llega.
-    bool sueltos = esperar_suelta();
-    while (b != boton::ninguno && sueltos && (b = esperar_boton(CONFIG_VENTANA_BOTONES_MS)) != boton::ninguno) {
-        atender(b, lfs);
-        sueltos = esperar_suelta();
+    bool released = wait_for_release();
+    while (b != button::none && released && (b = wait_for_button(CONFIG_BUTTON_WINDOW_MS)) != button::none) {
+        handle_button(b, lfs);
+        released = wait_for_release();
     }
-    desconectar(cliente);
-    dormir(sueltos);
+    disconnect_network(mqtt_client);
+    go_to_sleep(released);
 #endif
 }

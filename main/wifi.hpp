@@ -5,7 +5,10 @@
 // escrituras en NVS. Sustituye a example_connect().
 
 // Conecta y espera a tener IP. Se puede llamar una sola vez por arranque.
-bool wifi_conectar();
+bool wifi_connect();
 
 // Apaga la WiFi si se llegó a iniciar (seguro de llamar siempre).
-void wifi_desconectar();
+void wifi_disconnect();
+
+// true si ahora mismo está asociada y con IP.
+bool wifi_connected();

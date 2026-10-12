@@ -8,6 +8,10 @@ Firmware para el **Seeed Studio reTerminal E1001** (ESP32-S3 + ePaper monocromo 
 - **Solo descarga lo que cambia, y se recupera solo**. Los retenidos del broker son el estado completo; la sesión persistente guarda en cola los cambios mientras el dispositivo duerme. Ver [Sincronización](#sincronización).
 - **Estado en MQTT** (`reterminal/estado`). En cada conexión publica, retenido, un JSON con la versión del firmware, la causa del despertar, la imagen seleccionada, los huecos ocupados y el RSSI de la WiFi.
 - **Imagen seleccionada**. La pantalla muestra siempre la imagen del índice seleccionado, que se guarda en LittleFS y sobrevive a reinicios. Al llegar imágenes nuevas no se cambia de índice; solo se repinta si llega una nueva versión de la que se está viendo. Si se borra la seleccionada, pasa a la siguiente que exista.
+- **Indicadores en pantalla**, en negro sobre un recuadro blanco para que se lean sobre cualquier imagen. Se dibujan al pintar, no se guardan en las imágenes, y si cambian se repinta:
+  - **Arriba a la izquierda, «k/N»**: posición de la imagen entre las guardadas (con dos, «1/2» y «2/2»).
+  - **Arriba a la derecha, WiFi**: resultado de la última conexión. Normal = suscrito al broker; tachado = no conectó a la WiFi; con «!» = WiFi bien pero el broker no responde o rechaza la suscripción. Como el equipo duerme casi siempre, indica cómo fue la última comprobación (como mucho hace 1 h, o al pulsar *refresco*), no si la radio está encendida.
+  - **Arriba a la derecha, batería**: porcentaje dentro de un icono de batería. Se mide al despertar, antes de encender la WiFi (al transmitir cae la tensión), con la media recortada de 16 lecturas calibradas del ADC (GPIO1, divisor 1/2 activado por GPIO21). Se muestra en escalones de 5 % y con histéresis (solo cambia si la medida se aleja más de 3 puntos) para no repintar por el ruido. Es una estimación por la tensión de la LiPo; con el USB conectado marca ~100 %, porque la placa no indica si está cargando. «?» si la lectura no es plausible.
 - **Botones físicos**. *Anterior* (izquierdo, GPIO5) y *siguiente* (central, GPIO4) recorren las imágenes guardadas, saltando los huecos vacíos y dando la vuelta, sin conectarse a la WiFi. *Refresco* (verde, GPIO3) descarga la cola de MQTT y hace un refresco completo. Los tres despiertan el dispositivo del deep sleep, y tras despertar por un botón sigue 3 s despierto por si se pulsa otra vez. Los GPIO se cambian en `menuconfig`.
 - **Refresco parcial incluso tras deep sleep**. El último frame se guarda en LittleFS y, al despertar, se carga como imagen de referencia del controlador mediante un [parche del driver](#parche-del-driver-uc8179).
 - **Refresco completo cuando conviene**. Se hace uno tras cualquier reinicio que no sea un deep sleep, cada 10 refrescos parciales, cada 24 h o si el frame guardado no es fiable; así se limpian los restos que deja el parcial.
@@ -29,7 +33,7 @@ Firmware para el **Seeed Studio reTerminal E1001** (ESP32-S3 + ePaper monocromo 
 | Pantalla | ePaper 7,5" monocromo, 800×480, controlador UC8179 (panel GDEY075T7) |
 | Conexión al PC | USB-C (conversor USB-serie: aparece como `/dev/ttyUSB0` en Linux) |
 
-Pines que usa el firmware: SPI de la pantalla con MOSI en 9, SCLK en 7, CS en 10, DC en 11, RESET en 12 y BUSY en 13. La microSD comparte el bus, así que se desactiva con SD_EN en 16 y SD_CS en 14. Botones (activos a nivel bajo, con pull-up en la placa): KEY0 verde en 3, KEY1 central en 4 y KEY2 izquierdo en 5, según la [wiki de periféricos](https://wiki.seeedstudio.com/reterminal_e10xx_with_arduino_peripherals/).
+Pines que usa el firmware: SPI de la pantalla con MOSI en 9, SCLK en 7, CS en 10, DC en 11, RESET en 12 y BUSY en 13. La microSD comparte el bus, así que se desactiva con SD_EN en 16 y SD_CS en 14. Batería: ADC en GPIO1 con divisor 1/2, activado con GPIO21. Botones (activos a nivel bajo, con pull-up en la placa): KEY0 verde en 3, KEY1 central en 4 y KEY2 izquierdo en 5, según la [wiki de periféricos](https://wiki.seeedstudio.com/reterminal_e10xx_with_arduino_peripherals/).
 
 ## Requisitos para compilar y flashear
 
@@ -100,6 +104,8 @@ idf.py menuconfig
 | Contraseña MQTT | vacío | se guarda en `sdkconfig` |
 | Prefijo de los topics de imágenes | `reterminal/imagen` | cada imagen en `<prefijo>/<índice>` |
 | Topic donde publica su estado | `reterminal/estado` | vacío = no publica |
+| Tamaño de los indicadores | 2 | 0 = ninguno; 1 = 16 px de alto, 2 = 32 px, 3 = 48 px |
+| Mostrar posición / WiFi / batería | sí / sí / sí | cada indicador por separado |
 | Número de imágenes | 10 | índices 0 a N−1, hasta 255; 48 KB cada una |
 | GPIO anterior / siguiente / refresco | 5 / 4 / 3 | si «anterior» y «siguiente» van al revés, intercambia 5 y 4 |
 | Ms despierto esperando otra pulsación | 3000 | solo tras despertar por un botón |

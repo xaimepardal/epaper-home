@@ -6,14 +6,14 @@ menu "WiFi"
         help
             Sólo 2,4 GHz.
 
-    config WIFI_CLAVE
+    config WIFI_PASSWORD
         string "Contraseña (vacía = red abierta)"
         default ""
         help
             Se guarda en sdkconfig (no versionado). Con contraseña se exige
             WPA2 o superior.
 
-    config WIFI_CANAL
+    config WIFI_CHANNEL
         int "Canal del AP (0 = buscar en todos)"
         range 0 13
         default 0
@@ -23,7 +23,7 @@ menu "WiFi"
             En los despertares normales se conecta directamente al canal y
             BSSID de la última conexión buena.
 
-    config WIFI_INTENTOS
+    config WIFI_ATTEMPTS
         int "Intentos buscando el AP"
         range 1 10
         default 2
@@ -38,7 +38,7 @@ menu "WiFi"
             Sin DHCP la conexión es más rápida. Tiene que estar fuera del
             rango que reparte el DHCP del router (o reservada para este equipo).
 
-    config WIFI_MASCARA
+    config WIFI_NETMASK
         string "Máscara de red (con IP estática)"
         default "255.255.255.0"
 
@@ -65,27 +65,27 @@ menu "ePaper MQTT"
             SAN; puede ser una IP si el SAN la incluye). Para una CA propia,
             copia su certificado en main/certs/mqtt_ca.crt.
 
-    config MQTT_USUARIO
+    config MQTT_USERNAME
         string "Usuario MQTT (vacío = anónimo)"
         default ""
 
-    config MQTT_CLAVE
+    config MQTT_PASSWORD
         string "Contraseña MQTT"
         default ""
         help
             Se guarda en sdkconfig (no versionado), como la contraseña WiFi.
 
-    config MQTT_TOPIC_IMAGEN
+    config MQTT_IMAGE_TOPIC
         string "Prefijo de los topics de imágenes"
         default "reterminal/imagen"
         help
             Cada imagen va en su propio topic, <prefijo>/<índice> (índice de 0 a
-            MAX_IMAGENES-1), retenida y con QoS 1. Payload: zlib de 800x480 a
+            MAX_IMAGES-1), retenida y con QoS 1. Payload: zlib de 800x480 a
             1 bit por píxel (48000 bytes sin comprimir), filas de arriba abajo,
             MSB = píxel izquierdo, bit 1 = blanco. Es lo que da Pillow con
             Image.convert("1").tobytes(). Un retenido vacío borra esa imagen.
 
-    config MQTT_TOPIC_ESTADO
+    config MQTT_STATUS_TOPIC
         string "Topic donde publica su estado (vacío = no publica)"
         default "reterminal/estado"
         help
@@ -94,36 +94,68 @@ menu "ePaper MQTT"
             huecos ocupados y el RSSI de la WiFi. El usuario MQTT necesita
             permiso de escritura en este topic.
 
-    config MAX_IMAGENES
+    config MAX_IMAGES
         int "Número de imágenes (índices 0 .. N-1)"
         range 1 255
         default 10
         help
             Cada imagen ocupa 48 KB en LittleFS (~19,8 MB libres).
 
-    config BOTON_ANTERIOR_GPIO
+    config INDICATOR_SCALE
+        int "Tamaño de los indicadores (0 = ninguno)"
+        range 0 3
+        default 2
+        help
+            Indicadores superpuestos en negro sobre un recuadro blanco: «k/N»
+            arriba a la izquierda, WiFi y batería arriba a la derecha. Fuente
+            Spleen 8x16 por esta escala: 1 = 16 px de alto (~3 mm),
+            2 = 32 px (~6,5 mm), 3 = 48 px.
+
+    config SHOW_POSITION
+        bool "Mostrar la posición de la imagen («1/2», «2/2»…)"
+        default y
+
+    config SHOW_NETWORK
+        bool "Mostrar el icono de WiFi"
+        default y
+        help
+            Resultado de la última conexión: WiFi normal = suscrito al broker;
+            tachado = no conectó a la WiFi; con «!» = WiFi bien pero el broker
+            no responde o rechaza la suscripción. El dispositivo duerme casi
+            siempre, así que indica cómo fue la última comprobación (como mucho
+            hace INTERVAL_S), no si la radio está encendida.
+
+    config SHOW_BATTERY
+        bool "Mostrar el % de batería"
+        default y
+        help
+            Medido al despertar, antes de encender la WiFi, en escalones de 5 %
+            y con histéresis para no repintar por el ruido. Es una estimación
+            por la tensión de la LiPo; con el USB conectado marca ~100 %.
+
+    config BUTTON_PREV_GPIO
         int "GPIO del botón «anterior»"
         default 5
         help
             reTerminal E1001: KEY2 (izquierdo) = GPIO5, KEY1 (central) = GPIO4,
             KEY0 (verde) = GPIO3. Tienen que ser RTC GPIO (0-21) para despertar.
 
-    config BOTON_SIGUIENTE_GPIO
+    config BUTTON_NEXT_GPIO
         int "GPIO del botón «siguiente»"
         default 4
 
-    config BOTON_REFRESCO_GPIO
+    config BUTTON_REFRESH_GPIO
         int "GPIO del botón de refresco"
         default 3
 
-    config VENTANA_BOTONES_MS
+    config BUTTON_WINDOW_MS
         int "Milisegundos despierto esperando otra pulsación"
         default 3000
         help
             Tras despertar por un botón se queda despierto este tiempo por si
             se vuelve a pulsar, para no tener que despertar otra vez.
 
-    config SIN_DEEP_SLEEP
+    config NO_DEEP_SLEEP
         bool "Modo pruebas: no dormir nunca"
         default n
         help
@@ -133,7 +165,7 @@ menu "ePaper MQTT"
             que sirve para probarlo sin esperar. Gasta mucha batería: sólo para
             desarrollo.
 
-    config INTERVALO_S
+    config INTERVAL_S
         int "Segundos en deep sleep entre comprobaciones"
         range 10 86400
         default 3600
@@ -142,7 +174,7 @@ menu "ePaper MQTT"
             vuelve a dormir. Los botones despiertan además en cualquier
             momento. Menos segundos = más rápido en reaccionar, más consumo.
 
-    config VENTANA_MS
+    config QUEUE_WINDOW_MS
         int "Milisegundos esperando mensajes tras suscribirse"
         default 1000
         help
@@ -150,15 +182,15 @@ menu "ePaper MQTT"
             sesión persistente (o terminada la entrega de los retenidos en una
             sincronización completa).
 
-    config TIMEOUT_CONEXION_S
+    config CONNECT_TIMEOUT_S
         int "Segundos máximos para conectar al broker"
         default 20
 
-    config PARCIALES_MAX
+    config MAX_PARTIALS
         int "Refrescos parciales seguidos antes de forzar uno completo"
         default 10
 
-    config FULL_CADA_H
+    config FULL_REFRESH_H
         int "Horas máximas sin refresco completo"
         default 24
         help

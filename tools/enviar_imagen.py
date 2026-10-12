@@ -20,7 +20,7 @@ Broker con TLS y usuario (p. ej. el Mosquitto del NAS): --puerto 8883 --ca ca.cr
 Ejemplos:
     ./enviar_imagen.py 0 foto.jpg                     # tramado, en el índice 0
     ./enviar_imagen.py 1 foto.jpg --host 192.168.1.50 --ca ../main/certs/mqtt_ca.crt --usuario gatomarmota
-    ./enviar_imagen.py 2 logo.png --umbral 128        # blanco/negro sin tramado
+    ./enviar_imagen.py 2 logo.png --threshold 128        # blanco/negro sin tramado
     ./enviar_imagen.py 2 --borrar                     # borra la imagen 2
     ./enviar_imagen.py 0 foto.jpg --previa prev.png   # sólo genera la previsualización
 """
@@ -35,89 +35,89 @@ import zlib
 
 from PIL import Image, ImageOps
 
-ANCHO, ALTO = 800, 480
+WIDTH, HEIGHT = 800, 480
 
 
-def convertir(ruta, umbral=None, invertir=False, rotar=0):
-    img = Image.open(ruta)
+def convert_image(path, threshold=None, invert=False, rotate=0):
+    img = Image.open(path)
     img = ImageOps.exif_transpose(img)  # respeta la orientación de las fotos de móvil
-    if rotar:
-        img = img.rotate(rotar, expand=True)
+    if rotate:
+        img = img.rotate(rotate, expand=True)
     # Transparencia sobre fondo blanco
     if img.mode in ("RGBA", "LA", "P"):
         img = img.convert("RGBA")
-        fondo = Image.new("RGBA", img.size, "white")
-        img = Image.alpha_composite(fondo, img)
+        background = Image.new("RGBA", img.size, "white")
+        img = Image.alpha_composite(background, img)
     img = img.convert("L")
     # Encajar en 800x480 sin deformar, centrada sobre blanco
-    img = ImageOps.contain(img, (ANCHO, ALTO), Image.LANCZOS)
-    lienzo = Image.new("L", (ANCHO, ALTO), 255)
-    lienzo.paste(img, ((ANCHO - img.width) // 2, (ALTO - img.height) // 2))
-    if invertir:
-        lienzo = ImageOps.invert(lienzo)
-    if umbral is None:
-        return lienzo.convert("1")  # tramado Floyd-Steinberg
-    return lienzo.point(lambda p: 255 if p >= umbral else 0).convert("1", dither=Image.NONE)
+    img = ImageOps.contain(img, (WIDTH, HEIGHT), Image.LANCZOS)
+    canvas = Image.new("L", (WIDTH, HEIGHT), 255)
+    canvas.paste(img, ((WIDTH - img.width) // 2, (HEIGHT - img.height) // 2))
+    if invert:
+        canvas = ImageOps.invert(canvas)
+    if threshold is None:
+        return canvas.convert("1")  # tramado Floyd-Steinberg
+    return canvas.point(lambda p: 255 if p >= threshold else 0).convert("1", dither=Image.NONE)
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("indice", type=int, help="hueco de la imagen en el dispositivo (0-254)")
-    ap.add_argument("imagen", nargs="?")
-    ap.add_argument("--borrar", action="store_true", help="borra la imagen de ese índice")
-    ap.add_argument("--host", default="test.mosquitto.org")
-    ap.add_argument("--puerto", type=int, help="por defecto 1883, o 8883 con --ca")
-    ap.add_argument("--ca", help="CA del broker para TLS (mqtts)")
-    ap.add_argument("--usuario", help="usuario MQTT (contraseña: MQTT_PASS o se pide)")
-    ap.add_argument("--topic", default="reterminal/imagen", help="prefijo: se publica en <topic>/<índice>")
-    ap.add_argument("--umbral", type=int, help="0-255: blanco/negro puro en vez de tramado")
-    ap.add_argument("--invertir", action="store_true")
-    ap.add_argument("--rotar", type=int, default=0, help="grados (90, 180, 270)")
-    ap.add_argument("--previa", help="guarda la imagen resultante en PNG y no publica")
-    args = ap.parse_args()
-    if not 0 <= args.indice <= 254:
-        ap.error("el índice va de 0 a 254 (y por debajo del máximo configurado en el firmware)")
-    if args.borrar == (args.imagen is not None):
-        ap.error("indica una imagen o --borrar")
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("index", metavar="indice", type=int, help="hueco de la imagen en el dispositivo (0-254)")
+    parser.add_argument("image", metavar="imagen", nargs="?")
+    parser.add_argument("--borrar", dest="delete", action="store_true", help="borra la imagen de ese índice")
+    parser.add_argument("--host", default="test.mosquitto.org")
+    parser.add_argument("--puerto", dest="port", type=int, help="por defecto 1883, o 8883 con --ca")
+    parser.add_argument("--ca", help="CA del broker para TLS (mqtts)")
+    parser.add_argument("--usuario", dest="user", help="usuario MQTT (contraseña: MQTT_PASS o se pide)")
+    parser.add_argument("--topic", default="reterminal/imagen", help="prefijo: se publica en <topic>/<índice>")
+    parser.add_argument("--umbral", dest="threshold", type=int, help="0-255: blanco/negro puro en vez de tramado")
+    parser.add_argument("--invertir", dest="invert", action="store_true")
+    parser.add_argument("--rotar", dest="rotate", type=int, default=0, help="grados (90, 180, 270)")
+    parser.add_argument("--previa", dest="preview", help="guarda la imagen resultante en PNG y no publica")
+    args = parser.parse_args()
+    if not 0 <= args.index <= 254:
+        parser.error("el índice va de 0 a 254 (y por debajo del máximo configurado en el firmware)")
+    if args.delete == (args.image is not None):
+        parser.error("indica una imagen o --borrar")
 
     payload = b""
-    if args.imagen:
-        img = convertir(args.imagen, args.umbral, args.invertir, args.rotar)
-        crudo = img.tobytes()
-        assert len(crudo) == ANCHO * ALTO // 8, len(crudo)
-        comprimido = zlib.compress(crudo, 9)
-        print(f"{len(crudo)} bytes -> {len(comprimido)} comprimidos ({100 * len(comprimido) / len(crudo):.1f} %)")
-        if args.previa:
-            img.save(args.previa)
-            print(f"Previsualización en {args.previa}")
+    if args.image:
+        img = convert_image(args.image, args.threshold, args.invert, args.rotate)
+        raw = img.tobytes()
+        assert len(raw) == WIDTH * HEIGHT // 8, len(raw)
+        compressed = zlib.compress(raw, 9)
+        print(f"{len(raw)} bytes -> {len(compressed)} comprimidos ({100 * len(compressed) / len(raw):.1f} %)")
+        if args.preview:
+            img.save(args.preview)
+            print(f"Previsualización en {args.preview}")
             return
-        payload = comprimido
+        payload = compressed
 
-    conexion = ["-h", args.host, "-p", str(args.puerto or (8883 if args.ca else 1883))]
+    connection = ["-h", args.host, "-p", str(args.port or (8883 if args.ca else 1883))]
     if args.ca:
-        conexion += ["--cafile", args.ca]
+        connection += ["--cafile", args.ca]
 
-    topic = f"{args.topic}/{args.indice}"
-    publicar = ["mosquitto_pub", *conexion, "-t", topic, "-q", "1", "-r"]
+    topic = f"{args.topic}/{args.index}"
+    publish = ["mosquitto_pub", *connection, "-t", topic, "-q", "1", "-r"]
     with tempfile.TemporaryDirectory() as tmp:
         env = None
-        if args.usuario:
-            clave = os.environ.get("MQTT_PASS") or getpass.getpass(f"Contraseña MQTT de {args.usuario}: ")
+        if args.user:
+            password = os.environ.get("MQTT_PASS") or getpass.getpass(f"Contraseña MQTT de {args.user}: ")
             # Con -P la contraseña se vería en la lista de procesos (ps). mosquitto_pub
             # lee además $XDG_CONFIG_HOME/mosquitto_pub, una opción por línea.
             config = os.path.join(tmp, "mosquitto_pub")
             with open(os.open(config, os.O_WRONLY | os.O_CREAT, 0o600), "w") as f:
-                f.write(f"-u {args.usuario}\n-P {clave}\n")
+                f.write(f"-u {args.user}\n-P {password}\n")
             env = {**os.environ, "XDG_CONFIG_HOME": tmp}
-        if args.borrar:
-            subprocess.run([*publicar, "-n"], check=True, env=env)
+        if args.delete:
+            subprocess.run([*publish, "-n"], check=True, env=env)
         else:
-            datos = os.path.join(tmp, "imagen.z")
-            with open(datos, "wb") as f:
+            data_path = os.path.join(tmp, "imagen.z")
+            with open(data_path, "wb") as f:
                 f.write(payload)
-            subprocess.run([*publicar, "-f", datos], check=True, env=env)
-    accion = "Borrado" if args.borrar else "Publicada"
-    print(f"{accion} el índice {args.indice} en {args.host} {topic}")
+            subprocess.run([*publish, "-f", data_path], check=True, env=env)
+    action = "Borrado" if args.delete else "Publicada"
+    print(f"{action} el índice {args.index} en {args.host} {topic}")
 
 
 if __name__ == "__main__":
