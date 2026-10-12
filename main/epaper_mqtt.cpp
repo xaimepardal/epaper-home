@@ -48,6 +48,7 @@
 #include "esp_littlefs.h"
 #include "esp_log.h"
 #include "esp_mac.h"
+#include "esp_netif_sntp.h"
 #include "esp_psram.h"
 #include "esp_rom_crc.h"
 #include "esp_sleep.h"
@@ -653,6 +654,73 @@ static void paint(const idfxx::epaper::mono_framebuffer &frame, const idfxx::epa
     panel->ram_matches_glass = true;
 }
 
+// ---------------------------------------------------------------------------
+// Hora. Se sincroniza por SNTP en cada conexión y el RTC la mantiene durante el
+// deep sleep (con la deriva de su oscilador, que la siguiente conexión corrige).
+// Las comprobaciones se alinean a múltiplos de INTERVAL_S desde la medianoche
+// local: 3600 = cada hora en punto, 1800 = a las :00 y :30.
+// ---------------------------------------------------------------------------
+static bool clock_valid()
+{
+    return time(nullptr) > 1735689600;  // después del 1-1-2025: viene de SNTP, no del arranque
+}
+
+// Siguiente instante alineado estrictamente posterior a `from`. Sin hora
+// real (nunca hubo SNTP), simplemente `from` + intervalo.
+static time_t next_slot(time_t from)
+{
+    if (!clock_valid()) {
+        return from + CONFIG_INTERVAL_S;
+    }
+    struct tm local {};
+    localtime_r(&from, &local);
+    local.tm_hour = local.tm_min = local.tm_sec = 0;
+    local.tm_isdst = -1;  // que mktime decida si es horario de verano
+    const time_t midnight = mktime(&local);
+    return midnight + ((from - midnight) / CONFIG_INTERVAL_S + 1) * CONFIG_INTERVAL_S;
+}
+
+// Próxima comprobación tras una hecha ahora. El margen absorbe la deriva del
+// RTC: despertar a las 10:59:57 (o a las 11:00:03) cuenta como la de las
+// 11:00, y la siguiente es a las 12:00, sin despertar otra vez a los 3 s.
+static time_t next_check_after_now()
+{
+    const time_t guard = std::min<time_t>(60, CONFIG_INTERVAL_S / 4);
+    return next_slot(time(nullptr) + guard);
+}
+
+static std::string format_time(time_t t, const char *fmt)
+{
+    struct tm local {};
+    localtime_r(&t, &local);
+    char buf[32];
+    strftime(buf, sizeof(buf), fmt, &local);
+    return buf;
+}
+
+static bool sntp_started;
+
+static void start_sntp()
+{
+    if (sntp_started) {
+        return;
+    }
+    esp_sntp_config_t cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG(CONFIG_NTP_SERVER);
+    if (esp_netif_sntp_init(&cfg) == ESP_OK) {
+        sntp_started = true;
+    } else {
+        ESP_LOGW(TAG, "No se pudo iniciar SNTP");
+    }
+}
+
+static void stop_sntp()
+{
+    if (sntp_started) {
+        esp_netif_sntp_deinit();
+        sntp_started = false;
+    }
+}
+
 // PSRAM detectada en bytes (0 = no hay o no se inicializó: modo equivocado,
 // p. ej. Quad en vez de Octal; con SPIRAM_IGNORE_NOTFOUND arranca igualmente)
 static size_t psram_size()
@@ -906,6 +974,7 @@ static esp_mqtt_client_handle_t connect_network(bool &connected)
     if (!wifi_connect()) {
         return nullptr;
     }
+    start_sntp();  // en paralelo con MQTT; sync_mqtt() espera el resultado al final
 
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
@@ -951,6 +1020,7 @@ static esp_mqtt_client_handle_t connect_network(bool &connected)
         esp_mqtt_client_stop(client);
         esp_mqtt_client_destroy(client);
     }
+    stop_sntp();
     wifi_disconnect();
 }
 
@@ -1014,9 +1084,11 @@ static void publish_status(esp_mqtt_client_handle_t client)
     char json[1280];  // cabe la lista de 255 huecos
     snprintf(json, sizeof(json),
              R"({"firmware":"%s","despertar":"%s","seleccion":%d,"imagenes":[%s],"rssi":%d,"bateria":%d,"bateria_mv":%d,)"
-             R"("psram":%u,"despierto_ms":%lld})",
+             R"("psram":%u,"hora":"%s","proxima":"%s","despierto_ms":%lld})",
              esp_app_get_description()->version, wakeup_cause, sel ? static_cast<int>(*sel) : -1,
-             images.c_str(), rssi, rtc.battery, rtc.battery_mv, static_cast<unsigned>(psram_size()), esp_timer_get_time() / 1000);
+             images.c_str(), rssi, rtc.battery, rtc.battery_mv, static_cast<unsigned>(psram_size()),
+             clock_valid() ? format_time(time(nullptr), "%Y-%m-%dT%H:%M:%S").c_str() : "",
+             clock_valid() ? format_time(rtc.t_next_check, "%H:%M:%S").c_str() : "", esp_timer_get_time() / 1000);
     xEventGroupClearBits(events, BIT_PUBLISHED);
     if (esp_mqtt_client_publish(client, CONFIG_MQTT_STATUS_TOPIC, json, 0, 1, 1) < 0 ||
         !(xEventGroupWaitBits(events, BIT_PUBLISHED, pdTRUE, pdTRUE, pdMS_TO_TICKS(3000)) & BIT_PUBLISHED)) {
@@ -1049,7 +1121,7 @@ static net_state current_network()
 
 static void sync_mqtt()
 {
-    rtc.t_next_check = time(nullptr) + CONFIG_INTERVAL_S;
+    rtc.t_next_check = next_check_after_now();  // por si algo falla antes de terminar
     if (mqtt_client == nullptr) {
         attempted = true;
         bool subscribed;
@@ -1057,6 +1129,17 @@ static void sync_mqtt()
     }
     if (mqtt_ready()) {
         wait_for_queue();
+    }
+    if (sntp_started && esp_netif_sntp_sync_wait(pdMS_TO_TICKS(2000)) != ESP_OK) {
+        ESP_LOGW(TAG, "Sin respuesta de SNTP (%s): se sigue con la hora del RTC", CONFIG_NTP_SERVER);
+    }
+    // Con la hora ya corregida por SNTP
+    rtc.t_next_check = next_check_after_now();
+    if (clock_valid()) {
+        ESP_LOGI(TAG, "Hora %s; próxima comprobación %s", format_time(time(nullptr), "%Y-%m-%d %H:%M:%S").c_str(),
+                 format_time(rtc.t_next_check, "%H:%M:%S").c_str());
+    }
+    if (mqtt_ready()) {
         publish_status(mqtt_client);
     }
 }
@@ -1416,6 +1499,8 @@ extern "C" void app_main()
     mtx = xSemaphoreCreateMutex();
     xTaskCreate(button_task, "botones", 2048, nullptr, 5, nullptr);
 
+    setenv("TZ", CONFIG_TIMEZONE, 1);
+    tzset();
     if (esp_reset_reason() != ESP_RST_DEEPSLEEP) {
         rtc = {};  // arranque en frío, flasheo, crash...: no sabemos qué hay en el cristal
     }

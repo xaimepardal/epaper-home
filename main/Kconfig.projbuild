@@ -177,13 +177,32 @@ menu "ePaper MQTT"
             desarrollo.
 
     config INTERVAL_S
-        int "Segundos en deep sleep entre comprobaciones"
+        int "Segundos entre comprobaciones (alineadas al reloj)"
         range 10 86400
         default 3600
         help
-            Cada despertar conecta WiFi y MQTT, recoge las imágenes en cola y
-            vuelve a dormir. Los botones despiertan además en cualquier
-            momento. Menos segundos = más rápido en reaccionar, más consumo.
+            Cada comprobación conecta WiFi y MQTT, recoge las imágenes en cola
+            y vuelve a dormir. Se hacen a múltiplos exactos de este intervalo
+            desde la medianoche local: 3600 = cada hora en punto, 1800 = a las
+            :00 y :30, 900 = cada cuarto de hora. Use un divisor de 24 h
+            (86400) para que la serie no se desplace al cambiar de día.
+            Necesita la hora por SNTP; sin ella (primer arranque sin red),
+            cuenta el intervalo desde la última comprobación. Los botones
+            despiertan además en cualquier momento.
+
+    config NTP_SERVER
+        string "Servidor NTP"
+        default "pool.ntp.org"
+        help
+            Por nombre necesita DNS (con IP estática, el de WIFI_DNS o la
+            puerta de enlace). También vale la IP del router si da hora.
+
+    config TIMEZONE
+        string "Zona horaria (formato POSIX TZ)"
+        default "CET-1CEST,M3.5.0,M10.5.0/3"
+        help
+            Para alinear las comprobaciones a la hora local, con cambio de
+            horario. Por defecto, la de la España peninsular.
 
     config QUEUE_WINDOW_MS
         int "Milisegundos esperando mensajes tras suscribirse"
