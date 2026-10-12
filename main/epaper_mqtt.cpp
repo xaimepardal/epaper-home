@@ -36,6 +36,7 @@
 #include <optional>
 #include <string>
 #include <unistd.h>
+#include <sys/stat.h>
 
 #include "driver/gpio.h"
 #include "esp_app_desc.h"
@@ -142,7 +143,10 @@ static std::string image_path(unsigned index)
 
 static bool image_exists(unsigned index)
 {
-    return access(image_path(index).c_str(), F_OK) == 0;
+    // Con stat(), no access(): el VFS de LittleFS no implementa access y
+    // siempre devuelve -1 (ENOSYS), con lo que ninguna imagen "existía"
+    struct stat st;
+    return stat(image_path(index).c_str(), &st) == 0 && S_ISREG(st.st_mode);
 }
 
 static bool load_frame(const char *path, idfxx::epaper::mono_framebuffer &fb)
@@ -1000,14 +1004,14 @@ static void show(bool lfs, const char *notice, bool force)
         if (attempted) {
             rtc.network = current_network();  // con conexión abierta en este despertar, su estado real
         }
-        draw_indicators(frame, has_image ? sel : std::nullopt);
         if (!has_image) {
             if (notice == nullptr) {
                 xSemaphoreGive(mtx);
                 return;
             }
-            draw_message(frame, notice);
+            draw_message(frame, notice);  // limpia la pantalla: antes que los indicadores
         }
+        draw_indicators(frame, has_image ? sel : std::nullopt);
         if (!force && previous && std::ranges::equal(previous->data(), frame.data())) {
             ESP_LOGI(TAG, "Sin cambios en la imagen, no se refresca");
             xSemaphoreGive(mtx);
