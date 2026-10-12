@@ -423,6 +423,10 @@ static void draw_position(idfxx::epaper::mono_framebuffer &fb, unsigned index, b
     draw_text_scaled(fb, idfxx::font::spleen_8x16, padding, padding, text, K);
 }
 
+// true mientras hay conexión con el broker en este despertar: el icono de WiFi
+// va sin luna. Al desconectar para dormir vuelve la luna (sleep_view()).
+static bool online;
+
 // Luna creciente de `size` px en (x0, y0)
 static void draw_moon(idfxx::epaper::mono_framebuffer &fb, size_t x0, size_t y0, size_t size)
 {
@@ -499,10 +503,9 @@ static void draw_wifi_icon(idfxx::epaper::mono_framebuffer &fb, size_t x0, size_
         const size_t w = px(font.width), h = px(font.height);
         canvas.fill_rect(x0 + width - w - 2, y0, w + 2, h + 1, false);
         draw_text_scaled(fb, font, x0 + width - w - 1, y0, "!", K);
-    } else if (network == net_state::ok && !NO_DEEP_SLEEP) {
+    } else if (network == net_state::ok && !NO_DEEP_SLEEP && !online) {
         // Luna en la misma esquina que el "!": la última comprobación fue bien
-        // y está durmiendo. En modo batería lo que se pinta es lo que se ve
-        // durante el sueño, así que va en este pintado (sin uno extra al dormir).
+        // y está durmiendo (sin conexión ahora mismo).
         const size_t size = px(9);
         canvas.fill_rect(x0 + width - size - 2, y0, size + 2, size + 1, false);
         draw_moon(fb, x0 + width - size - 1, y0, size);
@@ -1173,6 +1176,9 @@ static net_state current_network()
     return mqtt_ready() ? net_state::ok : net_state::no_broker;
 }
 
+static bool lfs_mounted;
+static void redraw_status();  // más abajo: necesita quick_update()
+
 static void sync_mqtt()
 {
     rtc.t_next_check = next_check_after_now();  // por si algo falla antes de terminar
@@ -1180,7 +1186,14 @@ static void sync_mqtt()
         attempted = true;
         bool subscribed;
         mqtt_client = connect_network(subscribed);
+        if (mqtt_ready() && !NO_DEEP_SLEEP && SHOW_NETWORK) {
+            // Conectado: el icono pierde la luna mientras dure la conexión
+            online = true;
+            rtc.network = net_state::ok;
+            redraw_status();
+        }
     }
+    online = online || mqtt_ready();
     if (mqtt_ready()) {
         wait_for_queue();
     }
@@ -1420,6 +1433,12 @@ static void quick_update(bool lfs, Draw draw)
     xSemaphoreGive(mtx);
 }
 
+// Repinta sólo el recuadro de WiFi y batería con el estado actual
+static void redraw_status()
+{
+    quick_update(lfs_mounted, [](idfxx::epaper::mono_framebuffer &frame) { draw_status(frame); });
+}
+
 // Pinta la imagen seleccionada si no es lo que ya hay en el cristal. Si no hay
 // ninguna guardada pinta `aviso` (si lo hay). `forzar` = refresco completo
 // aunque no haya cambios (limpia los restos de los parciales).
@@ -1570,6 +1589,7 @@ extern "C" void app_main()
         rtc = {};  // arranque en frío, flasheo, crash...: no sabemos qué hay en el cristal
     }
     const bool lfs = mount_littlefs();
+    lfs_mounted = lfs;
     update_battery();  // antes de encender la WiFi: sin la caída de tensión al transmitir
 
     // Si despierta un botón de navegación no se toca la red; la comprobación
@@ -1620,6 +1640,15 @@ extern "C" void app_main()
         sync_mqtt();
         show(lfs, notice(), false);
         handle_buttons(lfs, 0);  // lo pulsado mientras tanto
+    }
+    if (online) {
+        // Se desconecta antes de dormir: el icono recupera la luna
+        disconnect_network(mqtt_client);
+        mqtt_client = nullptr;
+        online = false;
+        if (SHOW_NETWORK && rtc.network == net_state::ok) {
+            redraw_status();
+        }
     }
     end_painting(lfs);
     const bool released = wait_for_release();
