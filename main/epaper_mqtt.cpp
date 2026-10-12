@@ -545,11 +545,15 @@ static bool chunks_valid;
 static int chunk_index;  // hueco del mensaje en curso (-1 = topic que no es de imágenes)
 static volatile int64_t last_event_us;
 static volatile bool mqtt_connected;
+// El handler está dentro de un mensaje (entre trozos o guardándolo en flash,
+// que puede tardar más que la ventana de espera): la cola aún no está vacía
+static volatile bool handling;
 
 // Sincronización completa en curso: huecos que han llegado desde la suscripción
 // (bajo mtx). Al terminar se borran los demás, que ya no están en el broker.
 static bool full_sync;
 static bool subscription_rejected;
+static volatile bool subscription_acked;  // SUBACK aceptado (o sesión conservada) en esta conexión
 static std::bitset<MAX_IMAGES> received;
 
 static const std::string &image_filter()
@@ -592,6 +596,16 @@ static int topic_index(std::string_view topic)
 extern const char mqtt_ca_pem[] asm("_binary_mqtt_ca_crt_start");
 #endif
 
+// Un mensaje no se ha podido guardar, pero el broker ya tiene su PUBACK y no lo
+// repetirá en la sesión. Se cancela la sincronización completa en curso (para
+// no borrar ese hueco) y se borra sub.txt: la próxima conexión se vuelve a
+// suscribir y recibe de nuevo todos los retenidos. Con mtx tomado.
+static void force_full_sync()
+{
+    full_sync = false;
+    remove(SUBSCRIPTION_PATH);
+}
+
 // Guarda la imagen de un mensaje completo en su hueco, o lo borra si el
 // payload está vacío (retenido borrado en el broker).
 static void store_received(unsigned index, std::string_view payload)
@@ -617,31 +631,32 @@ static void store_received(unsigned index, std::string_view payload)
                 } else if (save_frame(image_path(index).c_str(), fb)) {
                     ESP_LOGI(TAG, "Guardada la imagen %u (%u bytes comprimida)", index, (unsigned)payload.size());
                     xEventGroupSetBits(events, BIT_CHANGED);
+                } else {
+                    force_full_sync();
                 }
             }
         }
     } catch (const std::exception &e) {
         ESP_LOGE(TAG, "No se pudo guardar la imagen %u: %s", index, e.what());
-        // Sin memoria no se sabe si la imagen era válida: que la sincronización
-        // completa no borre su hueco (se repetirá en el siguiente despertar)
-        full_sync = false;
+        force_full_sync();
     }
     xSemaphoreGive(mtx);
 }
 
-static void mqtt_event_handler(void *, esp_event_base_t, int32_t event_id, void *event_data)
+static void handle_mqtt_event(int32_t event_id, esp_mqtt_event_handle_t event)
 {
-    auto *event = static_cast<esp_mqtt_event_handle_t>(event_data);
     switch (static_cast<esp_mqtt_event_id_t>(event_id)) {
     case MQTT_EVENT_CONNECTED:
         mqtt_connected = true;
         subscription_rejected = false;
+        subscription_acked = false;
         last_event_us = esp_timer_get_time();
         xEventGroupSetBits(events, BIT_CHANGED);  // modo pruebas: repintar el icono de red
         if (event->session_present && read_subscription() == subscription_signature()) {
             // La suscripción sigue en el broker: sin volver a suscribirse sólo
             // llega lo publicado mientras dormía
             ESP_LOGI(TAG, "Sesión conservada en el broker: sólo cambios");
+            subscription_acked = true;
             xEventGroupSetBits(events, BIT_SUBSCRIBED);
         } else {
             ESP_LOGI(TAG, "Sincronización completa de %s (sesión previa: %d)", image_filter().c_str(),
@@ -656,6 +671,8 @@ static void mqtt_event_handler(void *, esp_event_base_t, int32_t event_id, void 
         break;
     case MQTT_EVENT_DISCONNECTED:
         mqtt_connected = false;
+        chunks_valid = false;  // el mensaje a medias no se completará
+        handling = false;
         xEventGroupSetBits(events, BIT_CHANGED);  // modo pruebas: repintar el icono de red
         break;
     case MQTT_EVENT_SUBSCRIBED:
@@ -670,6 +687,8 @@ static void mqtt_event_handler(void *, esp_event_base_t, int32_t event_id, void 
             subscription_rejected = true;
             remove(SUBSCRIPTION_PATH);
             xSemaphoreGive(mtx);
+        } else {
+            subscription_acked = true;
         }
         xEventGroupSetBits(events, BIT_SUBSCRIBED);
         break;
@@ -680,6 +699,8 @@ static void mqtt_event_handler(void *, esp_event_base_t, int32_t event_id, void 
         // Los mensajes grandes llegan troceados: se reensamblan aquí. El topic
         // sólo viene en el primer trozo. Una excepción aquí (bad_alloc) no puede
         // salir al código C de esp-mqtt: abortaría.
+        last_event_us = esp_timer_get_time();
+        handling = true;
         try {
             if (event->current_data_offset == 0) {
                 chunks.clear();
@@ -709,9 +730,10 @@ static void mqtt_event_handler(void *, esp_event_base_t, int32_t event_id, void 
             chunks_valid = false;
             std::string().swap(chunks);
             xSemaphoreTake(mtx, portMAX_DELAY);
-            full_sync = false;  // ver store_received()
+            force_full_sync();
             xSemaphoreGive(mtx);
         }
+        handling = chunks_valid;  // a mitad de un mensaje troceado, sigue "dentro"
         last_event_us = esp_timer_get_time();
         break;
     case MQTT_EVENT_ERROR: {
@@ -730,6 +752,17 @@ static void mqtt_event_handler(void *, esp_event_base_t, int32_t event_id, void 
     }
     default:
         break;
+    }
+}
+
+// Lo llama esp-mqtt (código C) desde su tarea: ninguna excepción puede salir de aquí
+static void mqtt_event_handler(void *, esp_event_base_t, int32_t event_id, void *event_data)
+{
+    try {
+        handle_mqtt_event(event_id, static_cast<esp_mqtt_event_handle_t>(event_data));
+    } catch (const std::exception &e) {
+        ESP_LOGE(TAG, "Evento MQTT %" PRIi32 ": %s", event_id, e.what());
+        handling = false;
     }
 }
 
@@ -765,6 +798,8 @@ static esp_mqtt_client_handle_t connect_network(bool &connected)
     }
     mqtt_cfg.session.disable_clean_session = true;
     mqtt_cfg.buffer.size = 4096;  // menos trozos al recibir imágenes
+    // El handler descomprime y guarda en LittleFS desde la tarea de MQTT (6 KB por defecto)
+    mqtt_cfg.task.stack_size = 8192;
     esp_mqtt_client_handle_t client = esp_mqtt_client_init(&mqtt_cfg);
     esp_mqtt_client_register_event(client, MQTT_EVENT_ANY, mqtt_event_handler, nullptr);
     esp_mqtt_client_start(client);
@@ -795,7 +830,7 @@ static esp_mqtt_client_handle_t connect_network(bool &connected)
 static void finish_sync()
 {
     xSemaphoreTake(mtx, portMAX_DELAY);
-    if (full_sync && mqtt_connected) {
+    if (full_sync && mqtt_connected && subscription_acked && !handling) {
         full_sync = false;
         for (unsigned i = 0; i < MAX_IMAGES; ++i) {
             if (!received.test(i) && remove(image_path(i).c_str()) == 0) {
@@ -809,10 +844,15 @@ static void finish_sync()
     xSemaphoreGive(mtx);
 }
 
-// Espera hasta que pase VENTANA_MS sin mensajes (la cola ya se ha vaciado).
+// Espera hasta que pase QUEUE_WINDOW_MS sin mensajes y sin ninguno a medias
+// (la cola ya se ha vaciado). Guardar una imagen en flash puede tardar más que
+// la ventana: mientras el handler esté dentro de un mensaje se sigue esperando.
+// Se corta si cae la conexión, y como mucho a los 60 s.
 static void wait_for_queue()
 {
-    while (esp_timer_get_time() - last_event_us < CONFIG_QUEUE_WINDOW_MS * 1000LL) {
+    const int64_t limit = esp_timer_get_time() + 60 * 1000000LL;
+    while (mqtt_connected && esp_timer_get_time() < limit &&
+           (handling || esp_timer_get_time() - last_event_us < CONFIG_QUEUE_WINDOW_MS * 1000LL)) {
         vTaskDelay(pdMS_TO_TICKS(100));
     }
     finish_sync();
@@ -853,10 +893,18 @@ static void publish_status(esp_mqtt_client_handle_t client)
     }
 }
 
-// Conexión de este despertar: se abre la primera vez que hace falta (un solo
-// intento) y se mantiene hasta dormir.
+// Conexión de este despertar: se abre la primera vez que hace falta y se
+// mantiene hasta dormir. Si no hubo WiFi se reintenta en la siguiente
+// sincronización (botón de refresco; en modo pruebas, cada minuto). Si hubo
+// WiFi, esp-mqtt sigue reintentando el broker por su cuenta.
 static esp_mqtt_client_handle_t mqtt_client;
-static bool attempted, connected;
+static bool attempted;
+
+// Suscrito y recibiendo ahora mismo
+static bool mqtt_ready()
+{
+    return mqtt_connected && subscription_acked && !subscription_rejected;
+}
 
 // Estado de la red ahora mismo. "ok" = suscrito al broker: lo que importa es
 // poder recibir imágenes, no sólo tener WiFi.
@@ -865,17 +913,18 @@ static net_state current_network()
     if (!wifi_connected()) {
         return net_state::no_wifi;
     }
-    return mqtt_connected && !subscription_rejected ? net_state::ok : net_state::no_broker;
+    return mqtt_ready() ? net_state::ok : net_state::no_broker;
 }
 
 static void sync_mqtt()
 {
     rtc.t_next_check = time(nullptr) + CONFIG_INTERVAL_S;
-    if (!attempted) {
+    if (mqtt_client == nullptr) {
         attempted = true;
-        mqtt_client = connect_network(connected);
+        bool subscribed;
+        mqtt_client = connect_network(subscribed);
     }
-    if (connected) {
+    if (mqtt_ready()) {
         wait_for_queue();
         publish_status(mqtt_client);
     }
@@ -964,7 +1013,8 @@ static button wakeup_button()
 {
     const time_t now = time(nullptr);
     const time_t sleep_s = std::max<time_t>(rtc.t_next_check - now, 1);
-    ESP_LOGI(TAG, "Despierto %lld ms; a deep sleep %lld s", esp_timer_get_time() / 1000, (long long)sleep_s);
+    ESP_LOGI(TAG, "Despierto %lld ms; a deep sleep %lld s; pila libre (mínimo) %u bytes", esp_timer_get_time() / 1000,
+             (long long)sleep_s, static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
     esp_sleep_enable_timer_wakeup(static_cast<uint64_t>(sleep_s) * 1000000ULL);
     if (wake_on_buttons) {
         esp_sleep_enable_ext1_wakeup_io(BUTTON_MASK, ESP_EXT1_WAKEUP_ANY_LOW);
@@ -991,14 +1041,19 @@ static void show(bool lfs, const char *notice, bool force)
         idfxx::epaper::mono_framebuffer frame(WIDTH, HEIGHT);
         std::optional<unsigned> sel;
         bool has_image = false;
-        while (lfs && !has_image && (sel = selection())) {
+        // Como mucho una vuelta: si una corrupta no se puede ni borrar, selection()
+        // la devolvería siempre y el bucle no acabaría (con mtx tomado)
+        for (unsigned tries = 0; lfs && !has_image && tries < MAX_IMAGES && (sel = selection()); ++tries) {
             has_image = load_frame(image_path(*sel).c_str(), frame);
             if (!has_image) {
                 // Corrupta: se borra y se pasa a la siguiente. Sin sub.txt, la
                 // próxima conexión hace una sincronización completa y la recupera
                 // del broker si sigue retenida.
-                remove(image_path(*sel).c_str());
                 remove(SUBSCRIPTION_PATH);
+                if (remove(image_path(*sel).c_str()) != 0) {
+                    ESP_LOGE(TAG, "No se puede borrar la imagen %u corrupta", *sel);
+                    break;
+                }
             }
         }
         if (attempted) {
@@ -1047,7 +1102,7 @@ static void show(bool lfs, const char *notice, bool force)
 static const char *notice()
 {
     static const std::string offline_text = "Sin conexion.\nReintentando cada " + std::to_string(CONFIG_INTERVAL_S) + " s";
-    return connected ? "Esperando imagenes en\n" CONFIG_MQTT_IMAGE_TOPIC "/<n>" : offline_text.c_str();
+    return mqtt_ready() ? "Esperando imagenes en\n" CONFIG_MQTT_IMAGE_TOPIC "/<n>" : offline_text.c_str();
 }
 
 // Anterior/siguiente: sólo cambia de imagen, sin red. Refresco (y despertar
@@ -1104,6 +1159,9 @@ extern "C" void app_main()
         wait_for_release();
         b = wait_for_button(60000);  // como mucho cada minuto, para seguir la batería
         if (b == button::none) {
+            if (mqtt_client == nullptr) {
+                sync_mqtt();  // no hubo WiFi: reintentar
+            }
             wait_for_queue();
             update_battery();
             show(lfs, notice(), false);
