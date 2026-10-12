@@ -20,15 +20,23 @@ menu "ePaper MQTT"
             Se guarda en sdkconfig (no versionado), como la contraseña WiFi.
 
     config MQTT_TOPIC_IMAGEN
-        string "Topic para imágenes"
-        default "reterminal/image"
+        string "Prefijo de los topics de imágenes"
+        default "reterminal/imagen"
         help
-            Payload: 1 byte con el índice (0 .. MAX_IMAGENES-1) seguido del zlib
-            de 800x480 a 1 bit por píxel (48000 bytes sin comprimir), filas de
-            arriba abajo, MSB = píxel izquierdo, bit 1 = blanco. Es lo que da
-            Pillow con Image.convert("1").tobytes(). Sólo el byte del índice
-            borra esa imagen. Publicar con QoS 1 y sin retain: el broker las
-            guarda en cola mientras el dispositivo duerme.
+            Cada imagen va en su propio topic, <prefijo>/<índice> (índice de 0 a
+            MAX_IMAGENES-1), retenida y con QoS 1. Payload: zlib de 800x480 a
+            1 bit por píxel (48000 bytes sin comprimir), filas de arriba abajo,
+            MSB = píxel izquierdo, bit 1 = blanco. Es lo que da Pillow con
+            Image.convert("1").tobytes(). Un retenido vacío borra esa imagen.
+
+    config MQTT_TOPIC_ESTADO
+        string "Topic donde publica su estado (vacío = no publica)"
+        default "reterminal/estado"
+        help
+            En cada conexión publica, retenido, un JSON con la versión del
+            firmware, la causa del despertar, la imagen seleccionada, los
+            huecos ocupados y el RSSI de la WiFi. El usuario MQTT necesita
+            permiso de escritura en este topic.
 
     config MAX_IMAGENES
         int "Número de imágenes (índices 0 .. N-1)"
@@ -83,7 +91,8 @@ menu "ePaper MQTT"
         default 2000
         help
             Tiempo sin mensajes nuevos que se da por vaciada la cola de la
-            sesión persistente.
+            sesión persistente (o terminada la entrega de los retenidos en una
+            sincronización completa).
 
     config TIMEOUT_CONEXION_S
         int "Segundos máximos para conectar al broker"
