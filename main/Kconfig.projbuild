@@ -150,6 +150,15 @@ menu "ePaper MQTT"
         int "GPIO del botón de refresco"
         default 3
 
+    config NAV_SETTLE_MS
+        int "Milisegundos sin pulsar antes de pintar la imagen"
+        default 800
+        help
+            Al pulsar anterior/siguiente se repinta al momento sólo el «k/N»;
+            la imagen se pinta cuando pasa este tiempo sin más pulsaciones. Así
+            se pueden saltar varias imágenes seguidas (dos «siguiente» = dos
+            imágenes) sin esperar a cada una.
+
     config BUTTON_WINDOW_MS
         int "Milisegundos despierto esperando otra pulsación"
         default 3000
