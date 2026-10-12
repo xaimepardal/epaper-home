@@ -26,6 +26,7 @@
 #include <idfxx/font/spleen.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <bitset>
 #include <cmath>
 #include <cstdio>
@@ -35,6 +36,7 @@
 #include <string_view>
 #include <optional>
 #include <string>
+#include <vector>
 #include <unistd.h>
 #include <sys/stat.h>
 
@@ -88,7 +90,7 @@ enum class button { none, previous, next, refresh };
 // ---------------------------------------------------------------------------
 static constexpr uint32_t RTC_MAGIC = 0x45504D51;
 // Resultado de la última conexión (lo que muestra el icono de WiFi)
-enum class net_state : uint8_t { unknown, ok, no_wifi, no_broker };
+enum class net_state : uint8_t { unknown, ok, no_wifi, no_broker, syncing };
 struct rtc_state {
     uint32_t magic;       // RTC_MAGIC = el frame guardado coincide con el cristal
     uint32_t partials;   // parciales desde el último completo
@@ -249,26 +251,31 @@ static std::optional<unsigned> selection()
     return std::nullopt;
 }
 
-// Selecciona la imagen anterior (paso -1) o siguiente (+1) que exista, dando la vuelta.
-static void navigate(int step)
+// Mueve la selección `steps` imágenes (negativo = hacia atrás) entre las que
+// existen, dando la vuelta. false si no se ha movido (ninguna o sólo una).
+static bool navigate_by(int steps)
 {
     const auto current = selection();
     if (!current) {
         ESP_LOGI(TAG, "No hay imágenes guardadas");
-        return;
+        return false;
     }
-    for (unsigned i = 1; i < MAX_IMAGES; ++i) {
-        int index = (static_cast<int>(*current) + step * static_cast<int>(i)) % static_cast<int>(MAX_IMAGES);
-        if (index < 0) {
-            index += MAX_IMAGES;
-        }
-        if (image_exists(index)) {
-            ESP_LOGI(TAG, "Imagen %u -> %d", *current, index);
-            save_selection(index);
-            return;
+    std::vector<unsigned> existing;
+    for (unsigned i = 0; i < MAX_IMAGES; ++i) {
+        if (image_exists(i)) {
+            existing.push_back(i);
         }
     }
-    ESP_LOGI(TAG, "Sólo hay una imagen (%u)", *current);
+    const int n = static_cast<int>(existing.size());
+    const int pos = static_cast<int>(std::ranges::find(existing, *current) - existing.begin());
+    const unsigned target = existing[((pos + steps) % n + n) % n];
+    if (target == *current) {
+        ESP_LOGI(TAG, "Imagen %u (no cambia: %d imágenes)", *current, n);
+        return false;
+    }
+    ESP_LOGI(TAG, "Imagen %u -> %u (%+d)", *current, target, steps);
+    save_selection(target);
+    return true;
 }
 
 static std::string read_subscription()
@@ -320,7 +327,45 @@ static void draw_message(idfxx::epaper::mono_framebuffer &fb, const std::string 
 // cae o vuelve, la batería baja un escalón) hace que se repinte. Negro sobre un
 // fondo blanco liso (sin contorno), para que se lean sobre cualquier imagen.
 // ---------------------------------------------------------------------------
-static constexpr size_t INDICATOR_SCALE = CONFIG_INDICATOR_SCALE;
+// Todo se mide a partir de la altura del texto en px (CONFIG_INDICATOR_HEIGHT):
+// la fuente Spleen 8x16 se escala por K, que puede ser fraccionario.
+static constexpr float K = CONFIG_INDICATOR_HEIGHT / 16.0f;
+
+// Unidad de la fuente (1/16 del alto del texto) en px, redondeada
+static constexpr size_t px(float units)
+{
+    return static_cast<size_t>(units * K + 0.5f);
+}
+
+// Texto con la fuente escalada por `k` (vecino más cercano: cada píxel toma el
+// del glifo bajo su centro). Con k fraccionario algunos trazos salen de un
+// píxel más que otros, pero los glifos de Spleen siguen leyéndose bien.
+static void draw_text_scaled(idfxx::epaper::mono_framebuffer &fb, const idfxx::font::mono_font &font, size_t x,
+                             size_t y, std::string_view text, float k)
+{
+    const size_t cell_w = static_cast<size_t>(font.width * k + 0.5f);
+    const size_t cell_h = static_cast<size_t>(font.height * k + 0.5f);
+    for (char c : text) {
+        if (font.contains(c)) {
+            for (size_t row = 0; row < cell_h; ++row) {
+                const size_t src_row = std::min<size_t>(font.height - 1, static_cast<size_t>((row + 0.5f) / k));
+                for (size_t col = 0; col < cell_w; ++col) {
+                    const size_t src_col = std::min<size_t>(font.width - 1, static_cast<size_t>((col + 0.5f) / k));
+                    if (font.ink_at(c, src_col, src_row)) {
+                        fb.set_pixel(x + col, y + row, true);
+                    }
+                }
+            }
+        }
+        x += cell_w;
+    }
+}
+
+// Ancho de `text` con la fuente de los indicadores
+static size_t text_width(std::string_view text)
+{
+    return text.size() * px(idfxx::font::spleen_8x16.width);
+}
 
 // Fondo blanco liso (sin contorno) bajo un indicador, para que se lea sobre la imagen
 static void clear_area(idfxx::gfx::canvas<idfxx::epaper::mono_framebuffer> &canvas, size_t x, size_t y, size_t width,
@@ -330,7 +375,7 @@ static void clear_area(idfxx::gfx::canvas<idfxx::epaper::mono_framebuffer> &canv
 }
 
 // Posición de `indice` entre las N imágenes guardadas (no el número de hueco)
-static void draw_position(idfxx::gfx::canvas<idfxx::epaper::mono_framebuffer> &canvas, unsigned index)
+static void draw_position(idfxx::epaper::mono_framebuffer &fb, unsigned index, bool only_label = false)
 {
     unsigned position = 0, total = 0;
     for (unsigned i = 0; i < MAX_IMAGES; ++i) {
@@ -342,11 +387,16 @@ static void draw_position(idfxx::gfx::canvas<idfxx::epaper::mono_framebuffer> &c
         }
     }
     const std::string text = std::to_string(position) + "/" + std::to_string(total);
-    const auto &font = idfxx::font::spleen_8x16;
-    constexpr size_t padding = 2 * INDICATOR_SCALE;
-    clear_area(canvas, 0, 0, text.size() * font.width * INDICATOR_SCALE + 2 * padding,
-               font.height * INDICATOR_SCALE + 2 * padding);
-    canvas.draw_text(font, padding, padding, text, true, INDICATOR_SCALE);
+    const size_t padding = px(2);
+    idfxx::gfx::canvas canvas(fb);
+    clear_area(canvas, 0, 0, text_width(text) + 2 * padding, px(16) + 2 * padding);
+    if (only_label) {
+        // Sobre lo que hay en el cristal: borrar también lo que ocupara una
+        // etiqueta más larga ("10/10" -> "9/10"); la imagen lo repinta luego
+        const std::string widest = std::to_string(MAX_IMAGES) + "/" + std::to_string(MAX_IMAGES);
+        clear_area(canvas, 0, 0, text_width(widest) + 2 * padding, px(16) + 2 * padding);
+    }
+    draw_text_scaled(fb, idfxx::font::spleen_8x16, padding, padding, text, K);
 }
 
 // Icono de WiFi (punto + 3 arcos) en un recuadro de ancho x alto que empieza
@@ -355,6 +405,21 @@ static void draw_wifi_icon(idfxx::epaper::mono_framebuffer &fb, size_t x0, size_
                          net_state network)
 {
     idfxx::gfx::canvas canvas(fb);
+    if (network == net_state::syncing) {
+        // "…": conectando tras pulsar refresco
+        const float r = height * 0.1f;
+        for (float fx : {0.2f, 0.5f, 0.8f}) {
+            const float cx = x0 + width * fx, cy = y0 + height * 0.6f;
+            for (size_t y = y0; y < y0 + height; ++y) {
+                for (size_t x = x0; x < x0 + width; ++x) {
+                    if ((x - cx) * (x - cx) + (y - cy) * (y - cy) <= r * r) {
+                        fb.set_pixel(x, y, true);
+                    }
+                }
+            }
+        }
+        return;
+    }
     const float dot_radius = height * 0.12f;
     const float cx = x0 + width / 2.0f;
     const float cy = y0 + height - 1 - dot_radius;  // centro del punto y de los arcos
@@ -378,7 +443,7 @@ static void draw_wifi_icon(idfxx::epaper::mono_framebuffer &fb, size_t x0, size_
     if (network == net_state::no_wifi) {
         // Raya blanca ancha y negra encima: corta los arcos y se ve tachado
         for (int pass = 0; pass < 2; ++pass) {
-            const int thickness = pass == 0 ? 2 * INDICATOR_SCALE : INDICATOR_SCALE / 2;
+            const int thickness = static_cast<int>(pass == 0 ? px(4) : px(1));
             for (int k = -thickness; k <= thickness; ++k) {
                 const int xa = std::clamp(static_cast<int>(x0) + k, static_cast<int>(x0), static_cast<int>(x0 + width - 1));
                 const int xb = std::clamp(static_cast<int>(x0 + width - 1) + k, static_cast<int>(x0), static_cast<int>(x0 + width - 1));
@@ -387,9 +452,9 @@ static void draw_wifi_icon(idfxx::epaper::mono_framebuffer &fb, size_t x0, size_
         }
     } else if (network == net_state::no_broker) {
         const auto &font = idfxx::font::spleen_5x8;
-        const size_t w = font.width * INDICATOR_SCALE, h = font.height * INDICATOR_SCALE;
+        const size_t w = px(font.width), h = px(font.height);
         canvas.fill_rect(x0 + width - w - 2, y0, w + 2, h + 1, false);
-        canvas.draw_text(font, x0 + width - w - 1, y0, "!", true, INDICATOR_SCALE);
+        draw_text_scaled(fb, font, x0 + width - w - 1, y0, "!", K);
     }
 }
 
@@ -401,15 +466,15 @@ static void draw_status(idfxx::epaper::mono_framebuffer &fb)
     if (!show_network && !show_battery) {
         return;
     }
-    const auto &font = idfxx::font::spleen_8x16;
-    constexpr size_t e = INDICATOR_SCALE;
-    constexpr size_t padding = 2 * e;
-    const size_t height = font.height * e + 2 * padding;  // igual que el de "k/N"
-    const size_t icon_height = font.height * e;
+    const size_t padding = px(2);
+    const size_t text_height = px(16);
+    const size_t height = text_height + 2 * padding;  // igual que el de "k/N"
+    const size_t icon_height = text_height;
     const size_t icon_width = 2 * static_cast<size_t>(std::ceil(0.7072f * (icon_height * 0.88f))) + 1;
-    const size_t body_width = 4 * font.width * e + 4 * e;  // cabe "100%"
-    const size_t body_height = height - 2 * e;
-    constexpr size_t terminal_width = 2 * e, terminal_height = 6 * e;
+    const size_t body_width = text_width("100%") + px(4);
+    const size_t body_height = height - px(2);
+    const size_t terminal_width = px(2), terminal_height = px(6);
+    const size_t outline = std::max<size_t>(1, px(1));
 
     size_t width = padding;
     if (show_network) {
@@ -429,24 +494,23 @@ static void draw_status(idfxx::epaper::mono_framebuffer &fb)
     }
     if (show_battery) {
         const size_t y = (height - body_height) / 2;
-        for (size_t g = 0; g < std::max<size_t>(1, e / 2); ++g) {
+        for (size_t g = 0; g < outline; ++g) {
             canvas.draw_rect(x + g, y + g, body_width - 2 * g, body_height - 2 * g, true);
         }
         canvas.fill_rect(x + body_width, (height - terminal_height) / 2, terminal_width, terminal_height, true);
         const std::string text = rtc.battery >= 0 ? std::to_string(rtc.battery) + "%" : "?";
-        canvas.draw_text(font, x + (body_width - text.size() * font.width * e) / 2,
-                         y + (body_height - font.height * e) / 2, text, true, e);
+        draw_text_scaled(fb, idfxx::font::spleen_8x16, x + (body_width - text_width(text)) / 2,
+                         y + (body_height - text_height) / 2, text, K);
     }
 }
 
 static void draw_indicators(idfxx::epaper::mono_framebuffer &fb, std::optional<unsigned> sel)
 {
-    if (INDICATOR_SCALE == 0) {
+    if (CONFIG_INDICATOR_HEIGHT == 0) {
         return;
     }
-    idfxx::gfx::canvas canvas(fb);
     if (CONFIG_SHOW_POSITION && sel) {
-        draw_position(canvas, *sel);
+        draw_position(fb, *sel);
     }
     draw_status(fb);
 }
@@ -457,7 +521,7 @@ static void draw_indicators(idfxx::epaper::mono_framebuffer &fb, std::optional<u
 // gasta batería y se nota).
 static void update_battery()
 {
-    if (!CONFIG_SHOW_BATTERY || INDICATOR_SCALE == 0) {
+    if (!CONFIG_SHOW_BATTERY || CONFIG_INDICATOR_HEIGHT == 0) {
         return;
     }
     rtc.battery_mv = static_cast<int16_t>(battery_mv());
@@ -954,31 +1018,72 @@ static button read_buttons()
     return button::none;
 }
 
-// Botón pulsado (estable 30 ms) antes de `timeout_ms`; en modo pruebas
-// también vuelve, con ninguno, si llega una imagen.
-static button wait_for_button(int64_t timeout_ms)
+// Pulsaciones pendientes. Las cuenta button_task, que sigue leyendo los
+// botones mientras app_main pinta o se conecta: dos "siguiente" seguidos
+// avanzan dos imágenes aunque el panel aún esté refrescando.
+static constexpr EventBits_t BIT_PRESS = BIT3;
+static std::atomic<int> nav_pending{0};  // +1 siguiente, -1 anterior
+static std::atomic<bool> refresh_pending{false};
+
+static void register_press(button b)
 {
-    const int64_t end = esp_timer_get_time() + timeout_ms * 1000;
-    while (esp_timer_get_time() < end) {
-        button b = read_buttons();
-        if (b != button::none) {
-            vTaskDelay(pdMS_TO_TICKS(30));
-            if (read_buttons() == b) {
-                return b;
+    if (b == button::next) {
+        ++nav_pending;
+    } else if (b == button::previous) {
+        --nav_pending;
+    } else if (b == button::refresh) {
+        refresh_pending = true;
+    }
+    xEventGroupSetBits(events, BIT_PRESS);
+}
+
+static bool press_pending()
+{
+    return nav_pending != 0 || refresh_pending;
+}
+
+// Lee los botones cada 10 ms; una pulsación cuenta al estar 30 ms abajo y no
+// se repite hasta soltar (30 ms arriba). Un botón que ya está pulsado al
+// arrancar (el que ha despertado al ESP32) no cuenta: lo apunta app_main.
+static void button_task(void *)
+{
+    static constexpr gpio_num_t pins[] = {GPIO_PREV, GPIO_NEXT, GPIO_REFRESH};
+    static constexpr button buttons[] = {button::previous, button::next, button::refresh};
+    static constexpr int STABLE = 3;
+    bool down[3];
+    int count[3] = {};
+    for (int i = 0; i < 3; ++i) {
+        down[i] = gpio_get_level(pins[i]) == 0;
+    }
+    while (true) {
+        for (int i = 0; i < 3; ++i) {
+            const bool low = gpio_get_level(pins[i]) == 0;
+            count[i] = low != down[i] ? count[i] + 1 : 0;
+            if (count[i] >= STABLE) {
+                down[i] = low;
+                count[i] = 0;
+                if (low) {
+                    register_press(buttons[i]);
+                }
             }
         }
-#if CONFIG_NO_DEEP_SLEEP
-        if (xEventGroupGetBits(events) & BIT_CHANGED) {
-            return button::none;
-        }
-#endif
-        vTaskDelay(pdMS_TO_TICKS(20));
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
-    return button::none;
+}
+
+// Espera hasta `ms` a que haya alguna pulsación pendiente. El bit se limpia
+// antes de mirar: si no, el de una pulsación ya atendida cortaría la espera.
+static bool wait_for_press(int64_t ms)
+{
+    xEventGroupClearBits(events, BIT_PRESS);
+    if (!press_pending() && ms > 0) {
+        xEventGroupWaitBits(events, BIT_PRESS, pdTRUE, pdFALSE, pdMS_TO_TICKS(ms));
+    }
+    return press_pending();
 }
 
 // Espera a que se suelten todos los botones; false si alguno sigue pulsado.
-static bool wait_for_release()
+[[maybe_unused]] static bool wait_for_release()
 {
     for (int i = 0; i < 250; ++i) {  // 5 s
         if (read_buttons() == button::none) {
@@ -1019,6 +1124,55 @@ static button wakeup_button()
         esp_sleep_enable_ext1_wakeup_io(BUTTON_MASK, ESP_EXT1_WAKEUP_ANY_LOW);
     }
     esp_deep_sleep_start();
+}
+
+// Pinta `frame` y lo apunta como lo que hay en el cristal. Con `previous` (lo
+// que hay ahora) refresco parcial; sin él, completo. `count_partial`: cuenta
+// para el límite de parciales seguidos (no los retoques pequeños de los
+// indicadores, que apenas dejan restos). Con mtx tomado.
+static void commit(bool lfs, const idfxx::epaper::mono_framebuffer &frame,
+                   const idfxx::epaper::mono_framebuffer *previous, bool count_partial)
+{
+    rtc.magic = 0;  // mientras se pinta, el cristal está en estado incierto
+    paint(frame, previous);
+    if (previous == nullptr) {
+        rtc.partials = 0;
+        rtc.t_full = time(nullptr);
+    } else if (count_partial) {
+        rtc.partials++;
+    }
+    if (lfs && save_frame(FRAME_PATH, frame)) {
+        rtc.magic = RTC_MAGIC;
+    }
+}
+
+// Retoca sólo los indicadores sobre lo que ya hay en el cristal, con un
+// refresco parcial: respuesta inmediata a un botón antes del trabajo lento.
+// Sin frame fiable del cristal no se hace nada (lo pintará show()).
+template <typename Draw>
+static void quick_update(bool lfs, Draw draw)
+{
+    xSemaphoreTake(mtx, portMAX_DELAY);
+    try {
+        std::optional<idfxx::epaper::mono_framebuffer> previous;
+        if (rtc.magic == RTC_MAGIC && lfs) {
+            previous.emplace(WIDTH, HEIGHT);
+            if (!load_frame(FRAME_PATH, *previous)) {
+                previous.reset();
+            }
+        }
+        if (previous && CONFIG_INDICATOR_HEIGHT > 0) {
+            idfxx::epaper::mono_framebuffer frame = *previous;
+            draw(frame);
+            if (!std::ranges::equal(previous->data(), frame.data())) {
+                commit(lfs, frame, &*previous, false);
+            }
+        }
+    } catch (const std::exception &e) {
+        ESP_LOGE(TAG, "Error: %s", e.what());
+        rtc.magic = 0;
+    }
+    xSemaphoreGive(mtx);
 }
 
 // Pinta la imagen seleccionada si no es lo que ya hay en el cristal. Si no hay
@@ -1080,17 +1234,7 @@ static void show(bool lfs, const char *notice, bool force)
                      rtc.partials);
         }
 
-        rtc.magic = 0;  // mientras se pinta, el cristal está en estado incierto
-        paint(frame, partial ? &*previous : nullptr);
-        if (partial) {
-            rtc.partials++;
-        } else {
-            rtc.partials = 0;
-            rtc.t_full = now;
-        }
-        if (lfs && save_frame(FRAME_PATH, frame)) {
-            rtc.magic = RTC_MAGIC;
-        }
+        commit(lfs, frame, partial ? &*previous : nullptr, true);
     } catch (const std::exception &e) {
         ESP_LOGE(TAG, "Error: %s", e.what());
         rtc.magic = 0;  // el próximo pintado será completo
@@ -1104,25 +1248,63 @@ static const char *notice()
     return mqtt_ready() ? "Esperando imagenes en\n" CONFIG_MQTT_IMAGE_TOPIC "/<n>" : offline_text.c_str();
 }
 
-// Anterior/siguiente: sólo cambia de imagen, sin red. Refresco (y despertar
-// por tiempo o arranque, `ninguno`): recoge la cola MQTT y pinta la seleccionada.
-static void handle_button(button b, bool lfs)
+// Anterior/siguiente: cada tanda de pulsaciones mueve la selección y repinta
+// sólo "k/N" (rápido); cuando pasan NAV_SETTLE_MS sin pulsar, se pinta la
+// imagen. Sin red.
+static void handle_navigation(bool lfs)
 {
-    switch (b) {
-    case button::previous:
-    case button::next:
-        navigate(b == button::previous ? -1 : 1);
+    bool moved = false;
+    while (true) {
+        const int steps = nav_pending.exchange(0);
+        if (steps != 0) {
+            if (navigate_by(steps)) {
+                moved = true;
+                if (CONFIG_SHOW_POSITION) {
+                    quick_update(lfs, [](idfxx::epaper::mono_framebuffer &frame) {
+                        if (const auto sel = selection()) {
+                            draw_position(frame, *sel, true);
+                        }
+                    });
+                }
+            }
+            continue;  // las pulsaciones durante el pintado ya están contadas
+        }
+        if (refresh_pending || !wait_for_press(CONFIG_NAV_SETTLE_MS) || refresh_pending) {
+            break;
+        }
+    }
+    if (moved) {
         show(lfs, nullptr, false);
-        break;
-    case button::refresh:
-        ESP_LOGI(TAG, "Botón de refresco");
-        sync_mqtt();
-        show(lfs, notice(), true);
-        break;
-    case button::none:
-        sync_mqtt();
-        show(lfs, notice(), false);
-        break;
+    }
+}
+
+// Refresco: el icono de WiFi pasa a "…" al momento; luego se conecta, recoge la
+// cola MQTT y repinta entero. Las pulsaciones repetidas mientras tanto cuentan
+// como una.
+static void handle_refresh(bool lfs)
+{
+    ESP_LOGI(TAG, "Botón de refresco");
+    if (CONFIG_SHOW_NETWORK) {
+        // show() lo sustituye luego por el estado real (sync_mqtt deja attempted)
+        rtc.network = net_state::syncing;
+        quick_update(lfs, [](idfxx::epaper::mono_framebuffer &frame) { draw_status(frame); });
+    }
+    sync_mqtt();
+    show(lfs, notice(), true);
+    refresh_pending = false;
+}
+
+// Atiende pulsaciones hasta que pasen `window_ms` sin ninguna
+static void handle_buttons(bool lfs, int64_t window_ms)
+{
+    while (true) {
+        if (refresh_pending) {
+            handle_refresh(lfs);
+        } else if (nav_pending != 0) {
+            handle_navigation(lfs);
+        } else if (!wait_for_press(window_ms)) {
+            return;
+        }
     }
 }
 
@@ -1134,6 +1316,7 @@ extern "C" void app_main()
     setup_buttons();
     events = xEventGroupCreate();
     mtx = xSemaphoreCreateMutex();
+    xTaskCreate(button_task, "botones", 2048, nullptr, 5, nullptr);
 
     if (esp_reset_reason() != ESP_RST_DEEPSLEEP) {
         rtc = {};  // arranque en frío, flasheo, crash...: no sabemos qué hay en el cristal
@@ -1143,40 +1326,44 @@ extern "C" void app_main()
 
     // Si despierta un botón de navegación no se toca la red; la comprobación
     // de MQTT sigue programada para rtc.t_next_check (ver dormir()).
-    button b = wakeup_button();
+    const button b = wakeup_button();
     if (b != button::none) {
         wakeup_cause = "boton";
-    } else if (esp_sleep_get_wakeup_causes() & BIT(ESP_SLEEP_WAKEUP_TIMER)) {
-        wakeup_cause = "temporizador";
+        register_press(b);
+    } else {
+        if (esp_sleep_get_wakeup_causes() & BIT(ESP_SLEEP_WAKEUP_TIMER)) {
+            wakeup_cause = "temporizador";
+        }
+        sync_mqtt();
+        show(lfs, notice(), false);
     }
-    handle_button(b, lfs);
 
 #if CONFIG_NO_DEEP_SLEEP
     // Modo pruebas: seguir conectado, pintar cada imagen según llega y atender los botones
     ESP_LOGW(TAG, "Modo pruebas: sin deep sleep");
     while (true) {
-        wait_for_release();
-        b = wait_for_button(60000);  // como mucho cada minuto, para seguir la batería
-        if (b == button::none) {
+        handle_buttons(lfs, 0);
+        // Hasta otra pulsación, una imagen nueva o un minuto (para seguir la batería)
+        xEventGroupClearBits(events, BIT_PRESS);
+        if (!press_pending()) {
+            xEventGroupWaitBits(events, BIT_PRESS | BIT_CHANGED, pdTRUE, pdFALSE, pdMS_TO_TICKS(60000));
+        }
+        if (!press_pending()) {
             if (mqtt_client == nullptr) {
                 sync_mqtt();  // no hubo WiFi: reintentar
             }
             wait_for_queue();
             update_battery();
             show(lfs, notice(), false);
-        } else {
-            handle_button(b, lfs);
         }
     }
 #else
-    // Si ha despertado un botón, unos segundos para seguir pasando imágenes sin
-    // volver a despertar. Tras un despertar por tiempo no: sería radio encendida
-    // esperando una pulsación que casi nunca llega.
-    bool released = wait_for_release();
-    while (b != button::none && released && (b = wait_for_button(CONFIG_BUTTON_WINDOW_MS)) != button::none) {
-        handle_button(b, lfs);
-        released = wait_for_release();
-    }
+    // Si ha despertado un botón, unos segundos para seguir pulsando sin volver
+    // a despertar. Tras un despertar por tiempo no hay ventana (sería radio
+    // encendida esperando una pulsación que casi nunca llega), pero se atiende
+    // lo que se haya pulsado mientras tanto.
+    handle_buttons(lfs, b != button::none ? CONFIG_BUTTON_WINDOW_MS : 0);
+    const bool released = wait_for_release();
     disconnect_network(mqtt_client);
     go_to_sleep(released);
 #endif

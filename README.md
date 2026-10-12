@@ -12,7 +12,10 @@ Firmware para el **Seeed Studio reTerminal E1001** (ESP32-S3 + ePaper monocromo 
   - **Arriba a la izquierda, «k/N»**: posición de la imagen entre las guardadas (con dos, «1/2» y «2/2»).
   - **Arriba a la derecha, WiFi**: resultado de la última conexión. Normal = suscrito al broker; tachado = no conectó a la WiFi; con «!» = WiFi bien pero el broker no responde o rechaza la suscripción. Como el equipo duerme casi siempre, indica cómo fue la última comprobación (como mucho hace 1 h, o al pulsar *refresco*), no si la radio está encendida.
   - **Arriba a la derecha, batería**: porcentaje dentro de un icono de batería. Se mide al despertar, antes de encender la WiFi (al transmitir cae la tensión), con la media recortada de 16 lecturas calibradas del ADC (GPIO1, divisor 1/2 activado por GPIO21). Se muestra en escalones de 5 % y con histéresis (solo cambia si la medida se aleja más de 3 puntos) para no repintar por el ruido. Es una estimación por la tensión de la LiPo; con el USB conectado marca ~100 %, porque la placa no indica si está cargando. «?» si la lectura no es plausible.
-- **Botones físicos**. *Anterior* (izquierdo, GPIO5) y *siguiente* (central, GPIO4) recorren las imágenes guardadas, saltando los huecos vacíos y dando la vuelta, sin conectarse a la WiFi. *Refresco* (verde, GPIO3) descarga la cola de MQTT y hace un refresco completo. Los tres despiertan el dispositivo del deep sleep, y tras despertar por un botón sigue 3 s despierto por si se pulsa otra vez. Los GPIO se cambian en `menuconfig`.
+- **Botones físicos**. Los tres despiertan el dispositivo del deep sleep; las pulsaciones se cuentan también mientras la pantalla refresca, así que se pueden encadenar. Los GPIO se cambian en `menuconfig`.
+  - *Anterior* (izquierdo, GPIO5) y *siguiente* (central, GPIO4) recorren las imágenes guardadas, saltando los huecos vacíos y dando la vuelta, sin conectarse a la WiFi. Cada pulsación repinta al momento solo el «k/N» (refresco parcial rápido) y la imagen se pinta cuando pasan 0,8 s sin pulsar: dos veces *siguiente* = dos imágenes adelante, sin esperar a la intermedia.
+  - *Refresco* (verde, GPIO3): el icono de WiFi pasa al momento a «…»; luego conecta, descarga la cola de MQTT y hace un refresco completo. Varias pulsaciones mientras tanto cuentan como una.
+  - Tras despertar por un botón sigue 3 s despierto por si se pulsa otra vez.
 - **Refresco parcial incluso tras deep sleep**. El último frame se guarda en LittleFS y, al despertar, se carga como imagen de referencia del controlador mediante un [parche del driver](#parche-del-driver-uc8179).
 - **Refresco completo cuando conviene**. Se hace uno tras cualquier reinicio que no sea un deep sleep, cada 10 refrescos parciales, cada 24 h o si el frame guardado no es fiable; así se limpian los restos que deja el parcial.
 - **Sin refrescos innecesarios**. Si la imagen resultante es idéntica a la que ya hay en pantalla, no se refresca.
@@ -105,10 +108,11 @@ idf.py menuconfig
 | Contraseña MQTT | vacío | se guarda en `sdkconfig` |
 | Prefijo de los topics de imágenes | `reterminal/imagen` | cada imagen en `<prefijo>/<índice>` |
 | Topic donde publica su estado | `reterminal/estado` | vacío = no publica |
-| Tamaño de los indicadores | 2 | 0 = ninguno; 1 = 16 px de alto, 2 = 32 px, 3 = 48 px |
+| Alto del texto de los indicadores | 22 px | 0 = ninguno; iconos y márgenes se escalan con él (16 px = tamaño natural de la fuente) |
 | Mostrar posición / WiFi / batería | sí / sí / sí | cada indicador por separado |
 | Número de imágenes | 10 | índices 0 a N−1, hasta 255; 48 KB cada una |
 | GPIO anterior / siguiente / refresco | 5 / 4 / 3 | si «anterior» y «siguiente» van al revés, intercambia 5 y 4 |
+| Ms sin pulsar antes de pintar la imagen | 800 | anterior/siguiente: hasta entonces solo se actualiza el «k/N» |
 | Ms despierto esperando otra pulsación | 3000 | solo tras despertar por un botón |
 | Modo pruebas: no dormir nunca | desactivado | solo para desarrollo |
 | Segundos en deep sleep | 3600 (1 h) | cada cuánto comprueba si hay imágenes nuevas |
@@ -181,7 +185,7 @@ Con un broker con TLS y usuario, añade a `mosquitto_pub` las opciones `-p 8883 
 
 **Publicar siempre con `-q 1` y `-r`.** Sin retener, un dispositivo que pierda la sesión no volvería a recibir esa imagen y la borraría en la siguiente sincronización completa. Los cambios llegan en el siguiente despertar (como mucho 1 h después, o al pulsar *refresco*).
 
-**Botones:** *anterior* y *siguiente* cambian de imagen en un par de segundos (refresco parcial, sin red); *refresco* conecta, descarga lo pendiente y hace un refresco completo.
+**Botones:** *anterior* y *siguiente* actualizan al momento el «k/N» y pintan la imagen cuando dejas de pulsar (se pueden pulsar varias veces para saltar varias imágenes; refresco parcial, sin red); *refresco* marca «…» en el icono de WiFi, conecta, descarga lo pendiente y hace un refresco completo.
 
 ## Sincronización
 
@@ -204,7 +208,7 @@ Las versiones anteriores usaban el topic `reterminal/image` con el índice en el
 2. Vuelve a publicar las imágenes con `tools/enviar_imagen.py` (ahora retenidas). La primera conexión hace una sincronización completa y **borra los huecos que no estén en el broker**.
 3. Lo que siga llegando por la suscripción antigua de la sesión se ignora (se avisa en el log).
 
-**Botones:** *anterior* y *siguiente* cambian de imagen en un par de segundos (refresco parcial, sin red); *refresco* conecta, descarga lo pendiente y hace un refresco completo.
+**Botones:** *anterior* y *siguiente* actualizan al momento el «k/N» y pintan la imagen cuando dejas de pulsar (se pueden pulsar varias veces para saltar varias imágenes; refresco parcial, sin red); *refresco* marca «…» en el icono de WiFi, conecta, descarga lo pendiente y hace un refresco completo.
 
 ## Formato de las imágenes
 
