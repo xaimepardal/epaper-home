@@ -459,6 +459,26 @@ static void draw_wifi_icon(idfxx::epaper::mono_framebuffer &fb, size_t x0, size_
     }
 }
 
+// Luna creciente de `size` px en (x0, y0): junto al icono de WiFi indica que la
+// última comprobación fue bien y que está durmiendo
+static void draw_moon(idfxx::epaper::mono_framebuffer &fb, size_t x0, size_t y0, size_t size)
+{
+    const float r = size / 2.0f;
+    const float cx = x0 + r, cy = y0 + r;
+    const float bx = cx + r * 0.5f, by = cy - r * 0.35f;  // disco que "muerde" la luna
+    const float rb = r * 0.8f;
+    for (size_t y = y0; y < y0 + size; ++y) {
+        for (size_t x = x0; x < x0 + size; ++x) {
+            const float px_ = x + 0.5f, py = y + 0.5f;
+            const bool in_moon = (px_ - cx) * (px_ - cx) + (py - cy) * (py - cy) <= r * r;
+            const bool in_bite = (px_ - bx) * (px_ - bx) + (py - by) * (py - by) <= rb * rb;
+            if (in_moon && !in_bite) {
+                fb.set_pixel(x, y, true);
+            }
+        }
+    }
+}
+
 // WiFi y batería en un recuadro arriba a la derecha
 static void draw_status(idfxx::epaper::mono_framebuffer &fb)
 {
@@ -476,10 +496,17 @@ static void draw_status(idfxx::epaper::mono_framebuffer &fb)
     const size_t body_height = height - px(2);
     const size_t terminal_width = px(2), terminal_height = px(6);
     const size_t outline = std::max<size_t>(1, px(1));
+    // En modo batería lo que se pinta es lo que se ve mientras duerme: con la
+    // comprobación bien, la luna va ya en este pintado (sin uno extra al dormir)
+    const bool show_moon = show_network && rtc.network == net_state::ok && !CONFIG_NO_DEEP_SLEEP;
+    const size_t moon_size = px(11);
 
     size_t width = padding;
     if (show_network) {
         width += icon_width + padding;
+    }
+    if (show_moon) {
+        width += moon_size + padding;
     }
     if (show_battery) {
         width += body_width + terminal_width + 2 * padding;  // el polo no pegado al borde
@@ -492,6 +519,10 @@ static void draw_status(idfxx::epaper::mono_framebuffer &fb)
     if (show_network) {
         draw_wifi_icon(fb, x, padding, icon_width, icon_height, rtc.network);
         x += icon_width + padding;
+    }
+    if (show_moon) {
+        draw_moon(fb, x, padding, moon_size);
+        x += moon_size + padding;
     }
     if (show_battery) {
         const size_t y = (height - body_height) / 2;
