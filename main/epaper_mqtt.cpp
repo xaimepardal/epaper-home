@@ -84,6 +84,29 @@ static constexpr gpio_num_t GPIO_REFRESH = static_cast<gpio_num_t>(CONFIG_BUTTON
 static constexpr uint64_t BUTTON_MASK = (1ULL << GPIO_PREV) | (1ULL << GPIO_NEXT) | (1ULL << GPIO_REFRESH);
 enum class button { none, previous, next, refresh };
 
+// Las opciones bool de Kconfig no se definen cuando están desactivadas: no
+// valen como expresión. Aquí, como constantes que siempre existen.
+#ifdef CONFIG_SHOW_POSITION
+static constexpr bool SHOW_POSITION = true;
+#else
+static constexpr bool SHOW_POSITION = false;
+#endif
+#ifdef CONFIG_SHOW_NETWORK
+static constexpr bool SHOW_NETWORK = true;
+#else
+static constexpr bool SHOW_NETWORK = false;
+#endif
+#ifdef CONFIG_SHOW_BATTERY
+static constexpr bool SHOW_BATTERY = true;
+#else
+static constexpr bool SHOW_BATTERY = false;
+#endif
+#ifdef CONFIG_NO_DEEP_SLEEP
+static constexpr bool NO_DEEP_SLEEP = true;
+#else
+static constexpr bool NO_DEEP_SLEEP = false;
+#endif
+
 // ---------------------------------------------------------------------------
 // Estado que sobrevive al deep sleep (y a nada más: cualquier otro reset lo
 // invalida, y entonces no se sabe qué hay en el cristal). Los tiempos son de
@@ -400,8 +423,28 @@ static void draw_position(idfxx::epaper::mono_framebuffer &fb, unsigned index, b
     draw_text_scaled(fb, idfxx::font::spleen_8x16, padding, padding, text, K);
 }
 
+// Luna creciente de `size` px en (x0, y0)
+static void draw_moon(idfxx::epaper::mono_framebuffer &fb, size_t x0, size_t y0, size_t size)
+{
+    const float r = size / 2.0f;
+    const float cx = x0 + r, cy = y0 + r;
+    const float bx = cx + r * 0.5f, by = cy - r * 0.35f;  // disco que "muerde" la luna
+    const float rb = r * 0.8f;
+    for (size_t y = y0; y < y0 + size; ++y) {
+        for (size_t x = x0; x < x0 + size; ++x) {
+            const float px_ = x + 0.5f, py = y + 0.5f;
+            const bool in_moon = (px_ - cx) * (px_ - cx) + (py - cy) * (py - cy) <= r * r;
+            const bool in_bite = (px_ - bx) * (px_ - bx) + (py - by) * (py - by) <= rb * rb;
+            if (in_moon && !in_bite) {
+                fb.set_pixel(x, y, true);
+            }
+        }
+    }
+}
+
 // Icono de WiFi (punto + 3 arcos) en un recuadro de ancho x alto que empieza
-// en (x0, y0). Tachado sin WiFi; con "!" si hay WiFi pero no broker.
+// en (x0, y0). Tachado sin WiFi; con "!" si hay WiFi pero no broker; con una
+// luna si fue bien y duerme (modo batería).
 static void draw_wifi_icon(idfxx::epaper::mono_framebuffer &fb, size_t x0, size_t y0, size_t width, size_t height,
                          net_state network)
 {
@@ -456,34 +499,21 @@ static void draw_wifi_icon(idfxx::epaper::mono_framebuffer &fb, size_t x0, size_
         const size_t w = px(font.width), h = px(font.height);
         canvas.fill_rect(x0 + width - w - 2, y0, w + 2, h + 1, false);
         draw_text_scaled(fb, font, x0 + width - w - 1, y0, "!", K);
-    }
-}
-
-// Luna creciente de `size` px en (x0, y0): junto al icono de WiFi indica que la
-// última comprobación fue bien y que está durmiendo
-static void draw_moon(idfxx::epaper::mono_framebuffer &fb, size_t x0, size_t y0, size_t size)
-{
-    const float r = size / 2.0f;
-    const float cx = x0 + r, cy = y0 + r;
-    const float bx = cx + r * 0.5f, by = cy - r * 0.35f;  // disco que "muerde" la luna
-    const float rb = r * 0.8f;
-    for (size_t y = y0; y < y0 + size; ++y) {
-        for (size_t x = x0; x < x0 + size; ++x) {
-            const float px_ = x + 0.5f, py = y + 0.5f;
-            const bool in_moon = (px_ - cx) * (px_ - cx) + (py - cy) * (py - cy) <= r * r;
-            const bool in_bite = (px_ - bx) * (px_ - bx) + (py - by) * (py - by) <= rb * rb;
-            if (in_moon && !in_bite) {
-                fb.set_pixel(x, y, true);
-            }
-        }
+    } else if (network == net_state::ok && !NO_DEEP_SLEEP) {
+        // Luna en la misma esquina que el "!": la última comprobación fue bien
+        // y está durmiendo. En modo batería lo que se pinta es lo que se ve
+        // durante el sueño, así que va en este pintado (sin uno extra al dormir).
+        const size_t size = px(9);
+        canvas.fill_rect(x0 + width - size - 2, y0, size + 2, size + 1, false);
+        draw_moon(fb, x0 + width - size - 1, y0, size);
     }
 }
 
 // WiFi y batería en un recuadro arriba a la derecha
 static void draw_status(idfxx::epaper::mono_framebuffer &fb)
 {
-    const bool show_network = CONFIG_SHOW_NETWORK && rtc.network != net_state::unknown;
-    const bool show_battery = CONFIG_SHOW_BATTERY;
+    const bool show_network = SHOW_NETWORK && rtc.network != net_state::unknown;
+    const bool show_battery = SHOW_BATTERY;
     if (!show_network && !show_battery) {
         return;
     }
@@ -496,17 +526,10 @@ static void draw_status(idfxx::epaper::mono_framebuffer &fb)
     const size_t body_height = height - px(2);
     const size_t terminal_width = px(2), terminal_height = px(6);
     const size_t outline = std::max<size_t>(1, px(1));
-    // En modo batería lo que se pinta es lo que se ve mientras duerme: con la
-    // comprobación bien, la luna va ya en este pintado (sin uno extra al dormir)
-    const bool show_moon = show_network && rtc.network == net_state::ok && !CONFIG_NO_DEEP_SLEEP;
-    const size_t moon_size = px(11);
 
     size_t width = padding;
     if (show_network) {
         width += icon_width + padding;
-    }
-    if (show_moon) {
-        width += moon_size + padding;
     }
     if (show_battery) {
         width += body_width + terminal_width + 2 * padding;  // el polo no pegado al borde
@@ -520,10 +543,7 @@ static void draw_status(idfxx::epaper::mono_framebuffer &fb)
         draw_wifi_icon(fb, x, padding, icon_width, icon_height, rtc.network);
         x += icon_width + padding;
     }
-    if (show_moon) {
-        draw_moon(fb, x, padding, moon_size);
-        x += moon_size + padding;
-    }
+
     if (show_battery) {
         const size_t y = (height - body_height) / 2;
         for (size_t g = 0; g < outline; ++g) {
@@ -541,7 +561,7 @@ static void draw_indicators(idfxx::epaper::mono_framebuffer &fb, std::optional<u
     if (CONFIG_INDICATOR_HEIGHT == 0) {
         return;
     }
-    if (CONFIG_SHOW_POSITION && sel) {
+    if (SHOW_POSITION && sel) {
         draw_position(fb, *sel);
     }
     draw_status(fb);
@@ -553,7 +573,7 @@ static void draw_indicators(idfxx::epaper::mono_framebuffer &fb, std::optional<u
 // gasta batería y se nota).
 static void update_battery()
 {
-    if (!CONFIG_SHOW_BATTERY || CONFIG_INDICATOR_HEIGHT == 0) {
+    if (!SHOW_BATTERY || CONFIG_INDICATOR_HEIGHT == 0) {
         return;
     }
     rtc.battery_mv = static_cast<int16_t>(battery_mv());
@@ -1470,7 +1490,7 @@ static void handle_navigation(bool lfs)
         if (steps != 0) {
             if (navigate_by(steps)) {
                 moved = true;
-                if (CONFIG_SHOW_POSITION) {
+                if (SHOW_POSITION) {
                     quick_update(lfs, [](idfxx::epaper::mono_framebuffer &frame) {
                         if (const auto sel = selection()) {
                             draw_position(frame, *sel, true);
@@ -1495,7 +1515,7 @@ static void handle_navigation(bool lfs)
 static void handle_refresh(bool lfs)
 {
     ESP_LOGI(TAG, "Botón de refresco");
-    if (CONFIG_SHOW_NETWORK) {
+    if (SHOW_NETWORK) {
         // show() lo sustituye luego por el estado real (sync_mqtt deja attempted)
         rtc.network = net_state::syncing;
         quick_update(lfs, [](idfxx::epaper::mono_framebuffer &frame) { draw_status(frame); });
