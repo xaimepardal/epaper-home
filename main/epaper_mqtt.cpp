@@ -320,7 +320,45 @@ static void draw_message(idfxx::epaper::mono_framebuffer &fb, const std::string 
 // cae o vuelve, la batería baja un escalón) hace que se repinte. Negro sobre un
 // fondo blanco liso (sin contorno), para que se lean sobre cualquier imagen.
 // ---------------------------------------------------------------------------
-static constexpr size_t INDICATOR_SCALE = CONFIG_INDICATOR_SCALE;
+// Todo se mide a partir de la altura del texto en px (CONFIG_INDICATOR_HEIGHT):
+// la fuente Spleen 8x16 se escala por K, que puede ser fraccionario.
+static constexpr float K = CONFIG_INDICATOR_HEIGHT / 16.0f;
+
+// Unidad de la fuente (1/16 del alto del texto) en px, redondeada
+static constexpr size_t px(float units)
+{
+    return static_cast<size_t>(units * K + 0.5f);
+}
+
+// Texto con la fuente escalada por `k` (vecino más cercano: cada píxel toma el
+// del glifo bajo su centro). Con k fraccionario algunos trazos salen de un
+// píxel más que otros, pero los glifos de Spleen siguen leyéndose bien.
+static void draw_text_scaled(idfxx::epaper::mono_framebuffer &fb, const idfxx::font::mono_font &font, size_t x,
+                             size_t y, std::string_view text, float k)
+{
+    const size_t cell_w = static_cast<size_t>(font.width * k + 0.5f);
+    const size_t cell_h = static_cast<size_t>(font.height * k + 0.5f);
+    for (char c : text) {
+        if (font.contains(c)) {
+            for (size_t row = 0; row < cell_h; ++row) {
+                const size_t src_row = std::min<size_t>(font.height - 1, static_cast<size_t>((row + 0.5f) / k));
+                for (size_t col = 0; col < cell_w; ++col) {
+                    const size_t src_col = std::min<size_t>(font.width - 1, static_cast<size_t>((col + 0.5f) / k));
+                    if (font.ink_at(c, src_col, src_row)) {
+                        fb.set_pixel(x + col, y + row, true);
+                    }
+                }
+            }
+        }
+        x += cell_w;
+    }
+}
+
+// Ancho de `text` con la fuente de los indicadores
+static size_t text_width(std::string_view text)
+{
+    return text.size() * px(idfxx::font::spleen_8x16.width);
+}
 
 // Fondo blanco liso (sin contorno) bajo un indicador, para que se lea sobre la imagen
 static void clear_area(idfxx::gfx::canvas<idfxx::epaper::mono_framebuffer> &canvas, size_t x, size_t y, size_t width,
@@ -330,7 +368,7 @@ static void clear_area(idfxx::gfx::canvas<idfxx::epaper::mono_framebuffer> &canv
 }
 
 // Posición de `indice` entre las N imágenes guardadas (no el número de hueco)
-static void draw_position(idfxx::gfx::canvas<idfxx::epaper::mono_framebuffer> &canvas, unsigned index)
+static void draw_position(idfxx::epaper::mono_framebuffer &fb, unsigned index)
 {
     unsigned position = 0, total = 0;
     for (unsigned i = 0; i < MAX_IMAGES; ++i) {
@@ -342,11 +380,10 @@ static void draw_position(idfxx::gfx::canvas<idfxx::epaper::mono_framebuffer> &c
         }
     }
     const std::string text = std::to_string(position) + "/" + std::to_string(total);
-    const auto &font = idfxx::font::spleen_8x16;
-    constexpr size_t padding = 2 * INDICATOR_SCALE;
-    clear_area(canvas, 0, 0, text.size() * font.width * INDICATOR_SCALE + 2 * padding,
-               font.height * INDICATOR_SCALE + 2 * padding);
-    canvas.draw_text(font, padding, padding, text, true, INDICATOR_SCALE);
+    const size_t padding = px(2);
+    idfxx::gfx::canvas canvas(fb);
+    clear_area(canvas, 0, 0, text_width(text) + 2 * padding, px(16) + 2 * padding);
+    draw_text_scaled(fb, idfxx::font::spleen_8x16, padding, padding, text, K);
 }
 
 // Icono de WiFi (punto + 3 arcos) en un recuadro de ancho x alto que empieza
@@ -378,7 +415,7 @@ static void draw_wifi_icon(idfxx::epaper::mono_framebuffer &fb, size_t x0, size_
     if (network == net_state::no_wifi) {
         // Raya blanca ancha y negra encima: corta los arcos y se ve tachado
         for (int pass = 0; pass < 2; ++pass) {
-            const int thickness = pass == 0 ? 2 * INDICATOR_SCALE : INDICATOR_SCALE / 2;
+            const int thickness = static_cast<int>(pass == 0 ? px(4) : px(1));
             for (int k = -thickness; k <= thickness; ++k) {
                 const int xa = std::clamp(static_cast<int>(x0) + k, static_cast<int>(x0), static_cast<int>(x0 + width - 1));
                 const int xb = std::clamp(static_cast<int>(x0 + width - 1) + k, static_cast<int>(x0), static_cast<int>(x0 + width - 1));
@@ -387,9 +424,9 @@ static void draw_wifi_icon(idfxx::epaper::mono_framebuffer &fb, size_t x0, size_
         }
     } else if (network == net_state::no_broker) {
         const auto &font = idfxx::font::spleen_5x8;
-        const size_t w = font.width * INDICATOR_SCALE, h = font.height * INDICATOR_SCALE;
+        const size_t w = px(font.width), h = px(font.height);
         canvas.fill_rect(x0 + width - w - 2, y0, w + 2, h + 1, false);
-        canvas.draw_text(font, x0 + width - w - 1, y0, "!", true, INDICATOR_SCALE);
+        draw_text_scaled(fb, font, x0 + width - w - 1, y0, "!", K);
     }
 }
 
@@ -401,15 +438,15 @@ static void draw_status(idfxx::epaper::mono_framebuffer &fb)
     if (!show_network && !show_battery) {
         return;
     }
-    const auto &font = idfxx::font::spleen_8x16;
-    constexpr size_t e = INDICATOR_SCALE;
-    constexpr size_t padding = 2 * e;
-    const size_t height = font.height * e + 2 * padding;  // igual que el de "k/N"
-    const size_t icon_height = font.height * e;
+    const size_t padding = px(2);
+    const size_t text_height = px(16);
+    const size_t height = text_height + 2 * padding;  // igual que el de "k/N"
+    const size_t icon_height = text_height;
     const size_t icon_width = 2 * static_cast<size_t>(std::ceil(0.7072f * (icon_height * 0.88f))) + 1;
-    const size_t body_width = 4 * font.width * e + 4 * e;  // cabe "100%"
-    const size_t body_height = height - 2 * e;
-    constexpr size_t terminal_width = 2 * e, terminal_height = 6 * e;
+    const size_t body_width = text_width("100%") + px(4);
+    const size_t body_height = height - px(2);
+    const size_t terminal_width = px(2), terminal_height = px(6);
+    const size_t outline = std::max<size_t>(1, px(1));
 
     size_t width = padding;
     if (show_network) {
@@ -429,24 +466,23 @@ static void draw_status(idfxx::epaper::mono_framebuffer &fb)
     }
     if (show_battery) {
         const size_t y = (height - body_height) / 2;
-        for (size_t g = 0; g < std::max<size_t>(1, e / 2); ++g) {
+        for (size_t g = 0; g < outline; ++g) {
             canvas.draw_rect(x + g, y + g, body_width - 2 * g, body_height - 2 * g, true);
         }
         canvas.fill_rect(x + body_width, (height - terminal_height) / 2, terminal_width, terminal_height, true);
         const std::string text = rtc.battery >= 0 ? std::to_string(rtc.battery) + "%" : "?";
-        canvas.draw_text(font, x + (body_width - text.size() * font.width * e) / 2,
-                         y + (body_height - font.height * e) / 2, text, true, e);
+        draw_text_scaled(fb, idfxx::font::spleen_8x16, x + (body_width - text_width(text)) / 2,
+                         y + (body_height - text_height) / 2, text, K);
     }
 }
 
 static void draw_indicators(idfxx::epaper::mono_framebuffer &fb, std::optional<unsigned> sel)
 {
-    if (INDICATOR_SCALE == 0) {
+    if (CONFIG_INDICATOR_HEIGHT == 0) {
         return;
     }
-    idfxx::gfx::canvas canvas(fb);
     if (CONFIG_SHOW_POSITION && sel) {
-        draw_position(canvas, *sel);
+        draw_position(fb, *sel);
     }
     draw_status(fb);
 }
@@ -457,7 +493,7 @@ static void draw_indicators(idfxx::epaper::mono_framebuffer &fb, std::optional<u
 // gasta batería y se nota).
 static void update_battery()
 {
-    if (!CONFIG_SHOW_BATTERY || INDICATOR_SCALE == 0) {
+    if (!CONFIG_SHOW_BATTERY || CONFIG_INDICATOR_HEIGHT == 0) {
         return;
     }
     rtc.battery_mv = static_cast<int16_t>(battery_mv());

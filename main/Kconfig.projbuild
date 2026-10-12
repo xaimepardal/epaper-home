@@ -101,15 +101,17 @@ menu "ePaper MQTT"
         help
             Cada imagen ocupa 48 KB en LittleFS (~19,8 MB libres).
 
-    config INDICATOR_SCALE
-        int "Tamaño de los indicadores (0 = ninguno)"
-        range 0 3
-        default 2
+    config INDICATOR_HEIGHT
+        int "Alto del texto de los indicadores, en px (0 = ninguno)"
+        range 0 48
+        default 22
         help
             Indicadores superpuestos en negro sobre fondo blanco: «k/N»
-            arriba a la izquierda, WiFi y batería arriba a la derecha. Fuente
-            Spleen 8x16 por esta escala: 1 = 16 px de alto (~3 mm),
-            2 = 32 px (~6,5 mm), 3 = 48 px.
+            arriba a la izquierda, WiFi y batería arriba a la derecha. Todo
+            (texto, iconos, márgenes) se escala a partir de esta altura, con la
+            fuente Spleen 8x16: 16 px = tamaño natural (~3 mm en el panel),
+            22 px (~4,5 mm, por defecto), 32 px = el doble. Con alturas que no
+            son múltiplo de 16 la fuente se escala por vecino más cercano.
 
     config SHOW_POSITION
         bool "Mostrar la posición de la imagen («1/2», «2/2»…)"

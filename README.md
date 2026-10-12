@@ -105,7 +105,7 @@ idf.py menuconfig
 | Contraseña MQTT | vacío | se guarda en `sdkconfig` |
 | Prefijo de los topics de imágenes | `reterminal/imagen` | cada imagen en `<prefijo>/<índice>` |
 | Topic donde publica su estado | `reterminal/estado` | vacío = no publica |
-| Tamaño de los indicadores | 2 | 0 = ninguno; 1 = 16 px de alto, 2 = 32 px, 3 = 48 px |
+| Alto del texto de los indicadores | 22 px | 0 = ninguno; iconos y márgenes se escalan con él (16 px = tamaño natural de la fuente) |
 | Mostrar posición / WiFi / batería | sí / sí / sí | cada indicador por separado |
 | Número de imágenes | 10 | índices 0 a N−1, hasta 255; 48 KB cada una |
 | GPIO anterior / siguiente / refresco | 5 / 4 / 3 | si «anterior» y «siguiente» van al revés, intercambia 5 y 4 |
