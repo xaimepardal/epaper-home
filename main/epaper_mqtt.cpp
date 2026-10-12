@@ -1184,8 +1184,12 @@ static void sync_mqtt()
     if (mqtt_ready()) {
         wait_for_queue();
     }
-    if (sntp_started && esp_netif_sntp_sync_wait(pdMS_TO_TICKS(2000)) != ESP_OK) {
-        ESP_LOGW(TAG, "Sin respuesta de SNTP (%s): se sigue con la hora del RTC", CONFIG_NTP_SERVER);
+    // SNTP se pidió al conectar, en paralelo con MQTT: si responde, ya lo ha
+    // hecho. Esperar más sólo alarga el despertar con la radio encendida; sin
+    // respuesta se sigue con el RTC, que en un intervalo se desvía segundos, y
+    // la siguiente conexión lo corrige.
+    if (sntp_started && esp_netif_sntp_sync_wait(pdMS_TO_TICKS(200)) != ESP_OK) {
+        ESP_LOGI(TAG, "SNTP (%s) sin respuesta aún: se sigue con la hora del RTC", CONFIG_NTP_SERVER);
     }
     // Con la hora ya corregida por SNTP
     rtc.t_next_check = next_check_after_now();
