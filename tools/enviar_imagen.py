@@ -96,19 +96,26 @@ def main():
     conexion = ["-h", args.host, "-p", str(args.puerto or (8883 if args.ca else 1883))]
     if args.ca:
         conexion += ["--cafile", args.ca]
-    if args.usuario:
-        clave = os.environ.get("MQTT_PASS") or getpass.getpass(f"Contraseña MQTT de {args.usuario}: ")
-        conexion += ["-u", args.usuario, "-P", clave]
 
     topic = f"{args.topic}/{args.indice}"
     publicar = ["mosquitto_pub", *conexion, "-t", topic, "-q", "1", "-r"]
-    if args.borrar:
-        subprocess.run([*publicar, "-n"], check=True)
-    else:
-        with tempfile.NamedTemporaryFile(suffix=".z") as f:
-            f.write(payload)
-            f.flush()
-            subprocess.run([*publicar, "-f", f.name], check=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        env = None
+        if args.usuario:
+            clave = os.environ.get("MQTT_PASS") or getpass.getpass(f"Contraseña MQTT de {args.usuario}: ")
+            # Con -P la contraseña se vería en la lista de procesos (ps). mosquitto_pub
+            # lee además $XDG_CONFIG_HOME/mosquitto_pub, una opción por línea.
+            config = os.path.join(tmp, "mosquitto_pub")
+            with open(os.open(config, os.O_WRONLY | os.O_CREAT, 0o600), "w") as f:
+                f.write(f"-u {args.usuario}\n-P {clave}\n")
+            env = {**os.environ, "XDG_CONFIG_HOME": tmp}
+        if args.borrar:
+            subprocess.run([*publicar, "-n"], check=True, env=env)
+        else:
+            datos = os.path.join(tmp, "imagen.z")
+            with open(datos, "wb") as f:
+                f.write(payload)
+            subprocess.run([*publicar, "-f", datos], check=True, env=env)
     accion = "Borrado" if args.borrar else "Publicada"
     print(f"{accion} el índice {args.indice} en {args.host} {topic}")
 
