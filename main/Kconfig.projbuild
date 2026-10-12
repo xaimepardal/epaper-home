@@ -152,7 +152,7 @@ menu "ePaper MQTT"
 
     config NAV_SETTLE_MS
         int "Milisegundos sin pulsar antes de pintar la imagen"
-        default 800
+        default 600
         help
             Al pulsar anterior/siguiente se repinta al momento sólo el «k/N»;
             la imagen se pinta cuando pasa este tiempo sin más pulsaciones. Así
@@ -161,10 +161,12 @@ menu "ePaper MQTT"
 
     config BUTTON_WINDOW_MS
         int "Milisegundos despierto esperando otra pulsación"
-        default 3000
+        default 6000
         help
             Tras despertar por un botón se queda despierto este tiempo por si
-            se vuelve a pulsar, para no tener que despertar otra vez.
+            se vuelve a pulsar: dentro de la ventana cada pulsación responde al
+            instante (el panel sigue encendido); fuera, hay que arrancar otra
+            vez (~0,5 s más el arranque del panel).
 
     config NO_DEEP_SLEEP
         bool "Modo pruebas: no dormir nunca"
@@ -219,6 +221,11 @@ menu "ePaper MQTT"
     config MAX_PARTIALS
         int "Refrescos parciales seguidos antes de forzar uno completo"
         default 10
+        help
+            Los parciales dejan restos que el completo limpia. Mientras se
+            navega con los botones el completo se aplaza (hasta el doble de
+            este valor) a la siguiente comprobación por tiempo, para no
+            interrumpir con 2-3 s de parpadeo.
 
     config FULL_REFRESH_H
         int "Horas máximas sin refresco completo"

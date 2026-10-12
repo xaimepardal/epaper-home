@@ -1419,7 +1419,11 @@ static void quick_update(bool lfs, Draw draw)
 // Pinta la imagen seleccionada si no es lo que ya hay en el cristal. Si no hay
 // ninguna guardada pinta `aviso` (si lo hay). `forzar` = refresco completo
 // aunque no haya cambios (limpia los restos de los parciales).
-static void show(bool lfs, const char *notice, bool force)
+// `browsing`: pintado de una tanda de botones. El refresco completo que toque
+// por MAX_PARTIALS o FULL_REFRESH_H (2-3 s con parpadeo) no se hace a mitad de
+// la navegación: se aplaza al siguiente pintado normal (la próxima comprobación
+// por tiempo), salvo que se acumulen el doble de parciales.
+static void show(bool lfs, const char *notice, bool force, bool browsing = false)
 {
     xSemaphoreTake(mtx, portMAX_DELAY);
     try {
@@ -1454,15 +1458,18 @@ static void show(bool lfs, const char *notice, bool force)
             draw_message(frame, notice);  // limpia la pantalla: antes que los indicadores
         }
         draw_indicators(frame, has_image ? sel : std::nullopt);
-        if (!force && previous && std::ranges::equal(previous->data(), frame.data())) {
+        const time_t now = time(nullptr);
+        const bool full_due = rtc.partials >= CONFIG_MAX_PARTIALS || now - rtc.t_full >= CONFIG_FULL_REFRESH_H * 3600;
+        const bool defer_full = browsing && rtc.partials < 2 * CONFIG_MAX_PARTIALS;
+        // Sin cambios no se repinta, salvo un completo pendiente fuera de la
+        // navegación: limpia los restos de los parciales aunque nada cambie
+        if (!force && previous && std::ranges::equal(previous->data(), frame.data()) && (!full_due || browsing)) {
             ESP_LOGI(TAG, "Sin cambios en la imagen, no se refresca");
             xSemaphoreGive(mtx);
             return;
         }
 
-        const time_t now = time(nullptr);
-        const bool partial = !force && previous && rtc.partials < CONFIG_MAX_PARTIALS &&
-                             now - rtc.t_full < CONFIG_FULL_REFRESH_H * 3600;
+        const bool partial = !force && previous && (!full_due || defer_full);
         if (has_image) {
             ESP_LOGI(TAG, "Imagen %u, refresco %s (parciales=%" PRIu32 ")", *sel, partial ? "parcial" : "completo",
                      rtc.partials);
@@ -1508,7 +1515,7 @@ static void handle_navigation(bool lfs)
         }
     }
     if (moved) {
-        show(lfs, nullptr, false);
+        show(lfs, nullptr, false, true);
     }
 }
 
