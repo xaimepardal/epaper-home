@@ -42,14 +42,19 @@ static EventGroupHandle_t events;
 static bool started;
 static bool reconnect;  // tras la primera conexión buena (modo pruebas: horas conectado)
 static volatile bool connected;  // asociada y con IP ahora mismo
+static void (*listener)();
 
 static void event_handler(void *, esp_event_base_t base, int32_t id, void *data)
 {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         const auto *d = static_cast<wifi_event_sta_disconnected_t *>(data);
         ESP_LOGW(TAG, "Desconectada (motivo %d)", d->reason);
+        const bool was_connected = connected;
         connected = false;
         xEventGroupSetBits(events, BIT_FAILED);
+        if (was_connected && listener != nullptr) {
+            listener();
+        }
         if (reconnect) {
             esp_wifi_connect();
         }
@@ -59,6 +64,9 @@ static void event_handler(void *, esp_event_base_t base, int32_t id, void *data)
         // (ESP_EVENT_ANY_ID) se ejecuta antes que el de esp_netif para ese id.
         connected = true;
         xEventGroupSetBits(events, BIT_READY);
+        if (listener != nullptr) {
+            listener();
+        }
     }
 }
 
@@ -201,4 +209,9 @@ void wifi_disconnect()
 bool wifi_connected()
 {
     return connected;
+}
+
+void wifi_set_listener(void (*on_change)())
+{
+    listener = on_change;
 }

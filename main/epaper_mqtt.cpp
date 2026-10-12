@@ -1022,6 +1022,9 @@ static void mqtt_event_handler(void *, esp_event_base_t, int32_t event_id, void 
 static esp_mqtt_client_handle_t connect_network(bool &connected)
 {
     connected = false;
+    // Una caída de la WiFi llega aquí al instante; esp-mqtt no se entera hasta
+    // que falla el socket o el keepalive (minutos)
+    wifi_set_listener([] { xEventGroupSetBits(events, BIT_CHANGED); });
     if (!wifi_connect()) {
         return nullptr;
     }
