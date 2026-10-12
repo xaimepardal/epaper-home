@@ -4,7 +4,7 @@
 // pedir IP por DHCP. Aquí:
 //  - El canal y el BSSID del AP de la última conexión buena se guardan en
 //    memoria RTC; el siguiente despertar conecta directamente a ellos. Si falla,
-//    se olvidan y se vuelve a intentar buscando el AP (en CONFIG_WIFI_CANAL si
+//    se olvidan y se vuelve a intentar buscando el AP (en CONFIG_WIFI_CHANNEL si
 //    está fijado, o en todos).
 //  - Con CONFIG_WIFI_IP no hay DHCP: la IP está lista al asociarse.
 //  - WIFI_STORAGE_RAM: la configuración no se escribe en NVS en cada conexión.
@@ -25,88 +25,92 @@
 
 static const char *TAG = "wifi";
 
-static constexpr EventBits_t BIT_LISTA = BIT0;  // asociada y con IP
-static constexpr EventBits_t BIT_FALLO = BIT1;
-static constexpr bool IP_ESTATICA = CONFIG_WIFI_IP[0] != '\0';
+static constexpr EventBits_t BIT_READY = BIT0;  // asociada y con IP
+static constexpr EventBits_t BIT_FAILED = BIT1;
+static constexpr bool STATIC_IP = CONFIG_WIFI_IP[0] != '\0';
 
 // Último AP bueno; sobrevive al deep sleep, no a otros reinicios
 static constexpr uint32_t CACHE_MAGIC = 0x57494649;  // "WIFI"
-struct cache_ap {
+struct ap_cache {
     uint32_t magic;
     uint8_t bssid[6];
-    uint8_t canal;
+    uint8_t channel;
 };
-RTC_DATA_ATTR static cache_ap cache;
+RTC_DATA_ATTR static ap_cache cache;
 
-static EventGroupHandle_t eventos;
-static bool iniciada;
-static bool reconectar;  // tras la primera conexión buena (modo pruebas: horas conectado)
+static EventGroupHandle_t events;
+static bool started;
+static bool reconnect;  // tras la primera conexión buena (modo pruebas: horas conectado)
+static volatile bool connected;  // asociada y con IP ahora mismo
 
-static void manejador(void *, esp_event_base_t base, int32_t id, void *datos)
+static void event_handler(void *, esp_event_base_t base, int32_t id, void *data)
 {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
-        const auto *d = static_cast<wifi_event_sta_disconnected_t *>(datos);
+        const auto *d = static_cast<wifi_event_sta_disconnected_t *>(data);
         ESP_LOGW(TAG, "Desconectada (motivo %d)", d->reason);
-        xEventGroupSetBits(eventos, BIT_FALLO);
-        if (reconectar) {
+        connected = false;
+        xEventGroupSetBits(events, BIT_FAILED);
+        if (reconnect) {
             esp_wifi_connect();
         }
-    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_CONNECTED && IP_ESTATICA) {
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_CONNECTED && STATIC_IP) {
         // El handler por defecto de esp_netif (registrado antes) ya ha levantado
         // la interfaz con la IP fija
-        xEventGroupSetBits(eventos, BIT_LISTA);
+        connected = true;
+        xEventGroupSetBits(events, BIT_READY);
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
-        xEventGroupSetBits(eventos, BIT_LISTA);
+        connected = true;
+        xEventGroupSetBits(events, BIT_READY);
     }
 }
 
-static void configurar_ip_estatica(esp_netif_t *netif)
+static void setup_static_ip(esp_netif_t *netif)
 {
     esp_netif_ip_info_t ip{};
     esp_netif_dns_info_t dns{};
     if (esp_netif_str_to_ip4(CONFIG_WIFI_IP, &ip.ip) != ESP_OK ||
-        esp_netif_str_to_ip4(CONFIG_WIFI_MASCARA, &ip.netmask) != ESP_OK ||
+        esp_netif_str_to_ip4(CONFIG_WIFI_NETMASK, &ip.netmask) != ESP_OK ||
         esp_netif_str_to_ip4(CONFIG_WIFI_GATEWAY, &ip.gw) != ESP_OK) {
         ESP_LOGE(TAG, "IP estática mal escrita en menuconfig");
         abort();
     }
-    const char *servidor_dns = CONFIG_WIFI_DNS[0] != '\0' ? CONFIG_WIFI_DNS : CONFIG_WIFI_GATEWAY;
+    const char *dns_server = CONFIG_WIFI_DNS[0] != '\0' ? CONFIG_WIFI_DNS : CONFIG_WIFI_GATEWAY;
     dns.ip.type = ESP_IPADDR_TYPE_V4;
-    esp_netif_str_to_ip4(servidor_dns, &dns.ip.u_addr.ip4);
+    esp_netif_str_to_ip4(dns_server, &dns.ip.u_addr.ip4);
     ESP_ERROR_CHECK(esp_netif_dhcpc_stop(netif));
     ESP_ERROR_CHECK(esp_netif_set_ip_info(netif, &ip));
     ESP_ERROR_CHECK(esp_netif_set_dns_info(netif, ESP_NETIF_DNS_MAIN, &dns));
 }
 
 // Un intento de conexión. Con `directo`, al BSSID y canal guardados.
-static bool intentar(bool directo, int timeout_ms)
+static bool try_connect(bool direct, int timeout_ms)
 {
     wifi_config_t cfg{};
     strncpy(reinterpret_cast<char *>(cfg.sta.ssid), CONFIG_WIFI_SSID, sizeof(cfg.sta.ssid));
-    strncpy(reinterpret_cast<char *>(cfg.sta.password), CONFIG_WIFI_CLAVE, sizeof(cfg.sta.password));
+    strncpy(reinterpret_cast<char *>(cfg.sta.password), CONFIG_WIFI_PASSWORD, sizeof(cfg.sta.password));
     // Con contraseña no se acepta un AP abierto o WEP con el mismo nombre
-    cfg.sta.threshold.authmode = CONFIG_WIFI_CLAVE[0] != '\0' ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
+    cfg.sta.threshold.authmode = CONFIG_WIFI_PASSWORD[0] != '\0' ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
     cfg.sta.scan_method = WIFI_FAST_SCAN;
-    if (directo) {
+    if (direct) {
         memcpy(cfg.sta.bssid, cache.bssid, sizeof(cache.bssid));
         cfg.sta.bssid_set = true;
-        cfg.sta.channel = cache.canal;
+        cfg.sta.channel = cache.channel;
     } else {
-        cfg.sta.channel = CONFIG_WIFI_CANAL;  // 0 = todos
+        cfg.sta.channel = CONFIG_WIFI_CHANNEL;  // 0 = todos
     }
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &cfg));
 
-    xEventGroupClearBits(eventos, BIT_LISTA | BIT_FALLO);
+    xEventGroupClearBits(events, BIT_READY | BIT_FAILED);
     if (esp_wifi_connect() != ESP_OK) {
         return false;
     }
-    const EventBits_t bits = xEventGroupWaitBits(eventos, BIT_LISTA | BIT_FALLO, pdFALSE, pdFALSE,
+    const EventBits_t bits = xEventGroupWaitBits(events, BIT_READY | BIT_FAILED, pdFALSE, pdFALSE,
                                                  pdMS_TO_TICKS(timeout_ms));
-    if (bits & BIT_LISTA) {
+    if (bits & BIT_READY) {
         wifi_ap_record_t ap{};
         if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
             memcpy(cache.bssid, ap.bssid, sizeof(cache.bssid));
-            cache.canal = ap.primary;
+            cache.channel = ap.primary;
             cache.magic = CACHE_MAGIC;
         }
         return true;
@@ -115,7 +119,7 @@ static bool intentar(bool directo, int timeout_ms)
     return false;
 }
 
-bool wifi_conectar()
+bool wifi_connect()
 {
     esp_err_t err = nvs_flash_init();  // la WiFi guarda ahí la calibración RF
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -125,48 +129,54 @@ bool wifi_conectar()
     ESP_ERROR_CHECK(err);
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
-    eventos = xEventGroupCreate();
+    events = xEventGroupCreate();
     esp_netif_t *netif = esp_netif_create_default_wifi_sta();
-    if (IP_ESTATICA) {
-        configurar_ip_estatica(netif);
+    if (STATIC_IP) {
+        setup_static_ip(netif);
     }
 
     wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&init));
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, manejador, nullptr));
-    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, manejador, nullptr));
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, event_handler, nullptr));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, event_handler, nullptr));
     ESP_ERROR_CHECK(esp_wifi_start());
-    iniciada = true;
+    started = true;
     esp_wifi_set_ps(WIFI_PS_NONE);
 
     bool ok = false;
     if (cache.magic == CACHE_MAGIC) {
-        ESP_LOGI(TAG, "Conectando a %s (canal %u, AP guardado)", CONFIG_WIFI_SSID, cache.canal);
-        ok = intentar(true, 3000);
+        ESP_LOGI(TAG, "Conectando a %s (canal %u, AP guardado)", CONFIG_WIFI_SSID, cache.channel);
+        ok = try_connect(true, 3000);
         if (!ok) {
             cache.magic = 0;  // el AP ha cambiado de canal o ya no está
         }
     }
-    for (int i = 1; !ok && i <= CONFIG_WIFI_INTENTOS; ++i) {
-        ESP_LOGI(TAG, "Conectando a %s (canal %d, intento %d)", CONFIG_WIFI_SSID, CONFIG_WIFI_CANAL, i);
-        ok = intentar(false, 10000);
+    for (int i = 1; !ok && i <= CONFIG_WIFI_ATTEMPTS; ++i) {
+        ESP_LOGI(TAG, "Conectando a %s (canal %d, intento %d)", CONFIG_WIFI_SSID, CONFIG_WIFI_CHANNEL, i);
+        ok = try_connect(false, 10000);
     }
     if (ok) {
-        reconectar = true;
+        reconnect = true;
         return true;
     }
     ESP_LOGE(TAG, "No se pudo conectar a %s", CONFIG_WIFI_SSID);
     return false;
 }
 
-void wifi_desconectar()
+void wifi_disconnect()
 {
-    if (iniciada) {
-        reconectar = false;
+    if (started) {
+        reconnect = false;
+        connected = false;
         esp_wifi_disconnect();
         esp_wifi_stop();
-        iniciada = false;
+        started = false;
     }
+}
+
+bool wifi_connected()
+{
+    return connected;
 }
