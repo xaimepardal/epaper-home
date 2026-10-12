@@ -199,6 +199,17 @@ menu "ePaper MQTT"
             Por nombre necesita DNS (con IP estática, el de WIFI_DNS o la
             puerta de enlace). También vale la IP del router si da hora.
 
+    config NTP_EVERY_H
+        int "Horas entre sincronizaciones de hora por NTP"
+        range 0 168
+        default 24
+        help
+            Entre medias el RTC mantiene la hora durante el deep sleep. Su
+            oscilador interno deriva: si la corrección que muestra el log
+            ("SNTP: hora corregida ...") pasa de unos 60 s, las comprobaciones
+            dejan de caer en punto; entonces conviene bajar este valor. 0 = en
+            cada conexión. Sin hora (arranque en frío) se pide siempre.
+
     config TIMEZONE
         string "Zona horaria (formato POSIX TZ)"
         default "CET-1CEST,M3.5.0,M10.5.0/3"
