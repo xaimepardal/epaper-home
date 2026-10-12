@@ -6,7 +6,7 @@ Firmware para el **Seeed Studio reTerminal E1001** (ESP32-S3 + ePaper monocromo 
 
 - **Imágenes por MQTT** (`reterminal/imagen/<índice>`). Cada imagen va **retenida en su propio topic**, con el índice (0 a 9 por defecto) al final, y se guarda en ese hueco de LittleFS, sustituyendo a la anterior. Son imágenes de 800×480 a 1 bit comprimidas con zlib; el ESP32 las descomprime con el *inflate* de su ROM y descarta las que lleguen corruptas. Un retenido vacío borra esa imagen. Formato en [Formato de las imágenes](#formato-de-las-imágenes).
 - **Solo descarga lo que cambia, y se recupera solo**. Los retenidos del broker son el estado completo; la sesión persistente guarda en cola los cambios mientras el dispositivo duerme. Ver [Sincronización](#sincronización).
-- **Estado en MQTT** (`reterminal/estado`). En cada conexión publica, retenido, un JSON con la versión del firmware, la causa del despertar, la imagen seleccionada, los huecos ocupados, el RSSI de la WiFi, la batería (% y tensión medida en mV) y la PSRAM detectada.
+- **Estado en MQTT** (`reterminal/estado`). En cada conexión publica, retenido, un JSON con la versión del firmware, la causa del despertar, la imagen seleccionada, los huecos ocupados, el RSSI de la WiFi, la batería (% y tensión medida en mV), la PSRAM detectada, la hora y la próxima comprobación.
 - **Imagen seleccionada**. La pantalla muestra siempre la imagen del índice seleccionado, que se guarda en LittleFS y sobrevive a reinicios. Al llegar imágenes nuevas no se cambia de índice; solo se repinta si llega una nueva versión de la que se está viendo. Si se borra la seleccionada, pasa a la siguiente que exista.
 - **Indicadores en pantalla**, en negro sobre un fondo blanco liso (sin contorno) para que se lean sobre cualquier imagen. Se dibujan al pintar, no se guardan en las imágenes, y si cambian se repinta:
   - **Arriba a la izquierda, «k/N»**: posición de la imagen entre las guardadas (con dos, «1/2» y «2/2»).
@@ -22,7 +22,8 @@ Firmware para el **Seeed Studio reTerminal E1001** (ESP32-S3 + ePaper monocromo 
 - **Sin refrescos innecesarios**. Si la imagen resultante es idéntica a la que ya hay en pantalla, no se refresca.
 - **MQTT con TLS y usuario**. Admite `mqtts://` con la CA propia del broker incrustada en el firmware ([`main/certs/`](main/certs/README.md)) o con el bundle de CAs públicas, y usuario y contraseña. Los fallos de TLS y de autenticación se explican en el log.
 - **WiFi rápida**. Al despertar conecta directamente al canal y BSSID del AP de la última conexión (guardados en memoria RTC), sin escanear; admite canal fijo e IP estática para no depender del DHCP, no escribe en NVS en cada conexión y desactiva el ahorro de energía del módem durante los pocos segundos que está conectado. Si el AP guardado falla, vuelve a buscarlo.
-- **Modo batería**. Despierta cada hora (configurable) o al pulsar un botón. Por tiempo, se conecta a la WiFi y a MQTT con sesión persistente, guarda las imágenes en cola, pinta si hace falta y vuelve a dormir. Pasar de imagen con los botones no adelanta ni retrasa la siguiente comprobación.
+- **Modo batería**. Despierta para comprobar a **horas exactas del reloj** (por defecto cada hora en punto; con 1800, a las :00 y :30) o al pulsar un botón. Por tiempo, se conecta a la WiFi y a MQTT con sesión persistente, guarda las imágenes en cola, pinta si hace falta y vuelve a dormir. Pasar de imagen con los botones no adelanta ni retrasa la siguiente comprobación; el botón de refresco hace una y la siguiente sigue siendo a la hora exacta.
+- **Hora por SNTP** en cada conexión (servidor y zona horaria configurables; por defecto `pool.ntp.org` y la hora peninsular española con cambio de horario). El RTC la mantiene durante el deep sleep y cada conexión corrige su deriva; si despierta unos segundos antes o después, esa comprobación cuenta como la de esa hora y no se repite.
 - **Modo pruebas** (opcional). No usa deep sleep: se queda conectado, guarda cada imagen en cuanto llega y atiende los botones al momento. Si no hay WiFi, la reintenta cada minuto.
 - **Pantallas de estado**. «Esperando imágenes» o «Sin conexión» cuando aún no hay ninguna imagen guardada.
 - **PSRAM de 8 MB**. Activada en modo Octal; los bloques de más de 16 KB (framebuffers, mensajes MQTT) van a ella y la RAM interna queda para la WiFi y el TLS. Si no se detecta, arranca sin ella. Sin test de memoria al arrancar, que se repetiría en cada despertar. Ver [Comprobar la PSRAM](#comprobar-la-psram).
@@ -116,7 +117,9 @@ idf.py menuconfig
 | Ms sin pulsar antes de pintar la imagen | 800 | anterior/siguiente: hasta entonces solo se actualiza el «k/N» |
 | Ms despierto esperando otra pulsación | 3000 | solo tras despertar por un botón |
 | Modo pruebas: no dormir nunca | desactivado | solo para desarrollo |
-| Segundos en deep sleep | 3600 (1 h) | cada cuánto comprueba si hay imágenes nuevas |
+| Segundos entre comprobaciones | 3600 (1 h) | alineadas al reloj desde la medianoche local: 3600 = en punto, 1800 = :00 y :30; mejor un divisor de 24 h |
+| Servidor NTP | `pool.ntp.org` | por nombre necesita DNS (con IP estática, el router); vale una IP |
+| Zona horaria | `CET-1CEST,M3.5.0,M10.5.0/3` | formato POSIX TZ |
 | Ms esperando mensajes | 1000 | sin mensajes nuevos para dar la cola (o los retenidos) por recibida |
 | Segundos máximos para conectar | 20 | |
 | Parciales antes de un completo | 10 | |
