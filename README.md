@@ -13,10 +13,11 @@ Firmware para el **Seeed Studio reTerminal E1001** (ESP32-S3 + ePaper monocromo 
   - **Arriba a la derecha, WiFi**: resultado de la última conexión. Normal = suscrito al broker; tachado = no conectó a la WiFi; con «!» = WiFi bien pero el broker no responde o rechaza la suscripción. Como el equipo duerme casi siempre, indica cómo fue la última comprobación (como mucho hace 1 h, o al pulsar *refresco*), no si la radio está encendida.
   - **Arriba a la derecha, batería**: porcentaje dentro de un icono de batería. Se mide al despertar, antes de encender la WiFi (al transmitir cae la tensión), con la media recortada de 16 lecturas calibradas del ADC (GPIO1, divisor 1/2 activado por GPIO21). Se muestra en escalones de 5 % y con histéresis (solo cambia si la medida se aleja más de 3 puntos) para no repintar por el ruido. Es una estimación por la tensión de la LiPo; con el USB conectado marca ~100 %, porque la placa no indica si está cargando. «?» si la lectura no es plausible.
 - **Botones físicos**. Los tres despiertan el dispositivo del deep sleep; las pulsaciones se cuentan también mientras la pantalla refresca, así que se pueden encadenar. Los GPIO se cambian en `menuconfig`.
-  - *Anterior* (izquierdo, GPIO5) y *siguiente* (central, GPIO4) recorren las imágenes guardadas, saltando los huecos vacíos y dando la vuelta, sin conectarse a la WiFi. Cada pulsación repinta al momento solo el «k/N» (refresco parcial rápido) y la imagen se pinta cuando pasan 0,8 s sin pulsar: dos veces *siguiente* = dos imágenes adelante, sin esperar a la intermedia.
+  - *Anterior* (izquierdo, GPIO5) y *siguiente* (central, GPIO4) recorren las imágenes guardadas, saltando los huecos vacíos y dando la vuelta, sin conectarse a la WiFi. Cada pulsación repinta al momento solo el «k/N» (refresco parcial rápido) y la imagen se pinta cuando pasan 0,6 s sin pulsar: dos veces *siguiente* = dos imágenes adelante, sin esperar a la intermedia.
   - *Refresco* (verde, GPIO3): el icono de WiFi pasa al momento a «…»; luego conecta, descarga la cola de MQTT y hace un refresco completo. Varias pulsaciones mientras tanto cuentan como una.
   - Mientras dura una tanda de pulsaciones el panel se queda encendido y en modo parcial, y solo se le envía la zona que cambia; se duerme (y se guarda el cristal en `frame.bin`) al terminar. Así cada pulsación es un refresco parcial, sin reiniciar el controlador.
-  - Tras despertar por un botón sigue 3 s despierto por si se pulsa otra vez.
+  - Tras despertar por un botón sigue 6 s despierto por si se pulsa otra vez.
+  - El refresco completo periódico (cada 10 parciales o 24 h) no interrumpe la navegación: se aplaza a la siguiente comprobación por tiempo, y entonces se hace aunque la imagen no haya cambiado.
 - **Refresco parcial incluso tras deep sleep**. El último frame se guarda en LittleFS y, al despertar, se carga como imagen de referencia del controlador mediante un [parche del driver](#parche-del-driver-uc8179).
 - **Refresco completo cuando conviene**. Se hace uno tras cualquier reinicio que no sea un deep sleep, cada 10 refrescos parciales, cada 24 h o si el frame guardado no es fiable; así se limpian los restos que deja el parcial.
 - **Sin refrescos innecesarios**. Si la imagen resultante es idéntica a la que ya hay en pantalla, no se refresca.
@@ -114,8 +115,8 @@ idf.py menuconfig
 | Mostrar posición / WiFi / batería | sí / sí / sí | cada indicador por separado |
 | Número de imágenes | 10 | índices 0 a N−1, hasta 255; 48 KB cada una |
 | GPIO anterior / siguiente / refresco | 5 / 4 / 3 | si «anterior» y «siguiente» van al revés, intercambia 5 y 4 |
-| Ms sin pulsar antes de pintar la imagen | 800 | anterior/siguiente: hasta entonces solo se actualiza el «k/N» |
-| Ms despierto esperando otra pulsación | 3000 | solo tras despertar por un botón |
+| Ms sin pulsar antes de pintar la imagen | 600 | anterior/siguiente: hasta entonces solo se actualiza el «k/N» |
+| Ms despierto esperando otra pulsación | 6000 | solo tras despertar por un botón; dentro, cada pulsación responde al instante |
 | Modo pruebas: no dormir nunca | desactivado | solo para desarrollo |
 | Segundos entre comprobaciones | 3600 (1 h) | alineadas al reloj desde la medianoche local: 3600 = en punto, 1800 = :00 y :30; mejor un divisor de 24 h |
 | Servidor NTP | `pool.ntp.org` | por nombre necesita DNS (con IP estática, el router); vale una IP |
