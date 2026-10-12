@@ -96,6 +96,7 @@ struct rtc_state {
     time_t t_next_check;     // próxima comprobación de MQTT
     net_state network;
     int8_t battery;       // % que se muestra (múltiplo de 5), -1 = sin medida válida
+    int16_t battery_mv;   // última medida, para el estado MQTT (-1 = falló)
 };
 RTC_DATA_ATTR static rtc_state rtc;
 
@@ -317,18 +318,15 @@ static void draw_message(idfxx::epaper::mono_framebuffer &fb, const std::string 
 // a la derecha. Se dibujan en lo que se pinta, no en las imágenes guardadas, y
 // como forman parte del frame, cualquier cambio (otra imagen guardada, la red
 // cae o vuelve, la batería baja un escalón) hace que se repinte. Negro sobre un
-// recuadro blanco con borde, para que se lean sobre cualquier imagen.
+// fondo blanco liso (sin contorno), para que se lean sobre cualquier imagen.
 // ---------------------------------------------------------------------------
 static constexpr size_t INDICATOR_SCALE = CONFIG_INDICATOR_SCALE;
 
-// Recuadro blanco con borde negro de `grosor` px
-static void draw_box(idfxx::gfx::canvas<idfxx::epaper::mono_framebuffer> &canvas, size_t x, size_t y, size_t width,
-                     size_t height, size_t thickness)
+// Fondo blanco liso (sin contorno) bajo un indicador, para que se lea sobre la imagen
+static void clear_area(idfxx::gfx::canvas<idfxx::epaper::mono_framebuffer> &canvas, size_t x, size_t y, size_t width,
+                       size_t height)
 {
     canvas.fill_rect(x, y, width, height, false);
-    for (size_t g = 0; g < thickness; ++g) {
-        canvas.draw_rect(x + g, y + g, width - 2 * g, height - 2 * g, true);
-    }
 }
 
 // Posición de `indice` entre las N imágenes guardadas (no el número de hueco)
@@ -346,8 +344,8 @@ static void draw_position(idfxx::gfx::canvas<idfxx::epaper::mono_framebuffer> &c
     const std::string text = std::to_string(position) + "/" + std::to_string(total);
     const auto &font = idfxx::font::spleen_8x16;
     constexpr size_t padding = 2 * INDICATOR_SCALE;
-    draw_box(canvas, 0, 0, text.size() * font.width * INDICATOR_SCALE + 2 * padding,
-             font.height * INDICATOR_SCALE + 2 * padding, 1);
+    clear_area(canvas, 0, 0, text.size() * font.width * INDICATOR_SCALE + 2 * padding,
+               font.height * INDICATOR_SCALE + 2 * padding);
     canvas.draw_text(font, padding, padding, text, true, INDICATOR_SCALE);
 }
 
@@ -422,7 +420,7 @@ static void draw_status(idfxx::epaper::mono_framebuffer &fb)
     }
     const size_t x0 = fb.width() - width;
     idfxx::gfx::canvas canvas(fb);
-    draw_box(canvas, x0, 0, width, height, 1);
+    clear_area(canvas, x0, 0, width, height);
 
     size_t x = x0 + padding;
     if (show_network) {
@@ -462,7 +460,8 @@ static void update_battery()
     if (!CONFIG_SHOW_BATTERY || INDICATOR_SCALE == 0) {
         return;
     }
-    const int pct = battery_percent(battery_mv());
+    rtc.battery_mv = static_cast<int16_t>(battery_mv());
+    const int pct = battery_percent(rtc.battery_mv);
     if (pct < 0) {
         rtc.battery = -1;
     } else if (rtc.battery < 0 || std::abs(pct - rtc.battery) > 3) {
@@ -882,10 +881,10 @@ static void publish_status(esp_mqtt_client_handle_t client)
 
     char json[1280];  // cabe la lista de 255 huecos
     snprintf(json, sizeof(json),
-             R"({"firmware":"%s","despertar":"%s","seleccion":%d,"imagenes":[%s],"rssi":%d,"bateria":%d,)"
+             R"({"firmware":"%s","despertar":"%s","seleccion":%d,"imagenes":[%s],"rssi":%d,"bateria":%d,"bateria_mv":%d,)"
              R"("psram":%u,"despierto_ms":%lld})",
              esp_app_get_description()->version, wakeup_cause, sel ? static_cast<int>(*sel) : -1,
-             images.c_str(), rssi, rtc.battery, static_cast<unsigned>(psram_size()), esp_timer_get_time() / 1000);
+             images.c_str(), rssi, rtc.battery, rtc.battery_mv, static_cast<unsigned>(psram_size()), esp_timer_get_time() / 1000);
     xEventGroupClearBits(events, BIT_PUBLISHED);
     if (esp_mqtt_client_publish(client, CONFIG_MQTT_STATUS_TOPIC, json, 0, 1, 1) < 0 ||
         !(xEventGroupWaitBits(events, BIT_PUBLISHED, pdTRUE, pdTRUE, pdMS_TO_TICKS(3000)) & BIT_PUBLISHED)) {

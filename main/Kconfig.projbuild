@@ -106,7 +106,7 @@ menu "ePaper MQTT"
         range 0 3
         default 2
         help
-            Indicadores superpuestos en negro sobre un recuadro blanco: «k/N»
+            Indicadores superpuestos en negro sobre fondo blanco: «k/N»
             arriba a la izquierda, WiFi y batería arriba a la derecha. Fuente
             Spleen 8x16 por esta escala: 1 = 16 px de alto (~3 mm),
             2 = 32 px (~6,5 mm), 3 = 48 px.
