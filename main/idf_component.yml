@@ -12,5 +12,3 @@ dependencies:
   cleishm/idfxx_font_spleen: "^1.0.0"
   espressif/mqtt: "^1.0.0"
   joltwallet/littlefs: "^1.22.0"
-  protocol_examples_common:
-    path: ${IDF_PATH}/examples/common_components/protocol_examples_common

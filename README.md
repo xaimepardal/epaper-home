@@ -8,11 +8,12 @@ Firmware para el **Seeed Studio reTerminal E1001** (ESP32-S3 + ePaper monocromo 
 - **Solo descarga lo que cambia, y se recupera solo**. Los retenidos del broker son el estado completo; la sesión persistente guarda en cola los cambios mientras el dispositivo duerme. Ver [Sincronización](#sincronización).
 - **Estado en MQTT** (`reterminal/estado`). En cada conexión publica, retenido, un JSON con la versión del firmware, la causa del despertar, la imagen seleccionada, los huecos ocupados y el RSSI de la WiFi.
 - **Imagen seleccionada**. La pantalla muestra siempre la imagen del índice seleccionado, que se guarda en LittleFS y sobrevive a reinicios. Al llegar imágenes nuevas no se cambia de índice; solo se repinta si llega una nueva versión de la que se está viendo. Si se borra la seleccionada, pasa a la siguiente que exista.
-- **Botones físicos**. *Anterior* (izquierdo, GPIO5) y *siguiente* (central, GPIO4) recorren las imágenes guardadas, saltando los huecos vacíos y dando la vuelta, sin conectarse a la WiFi. *Refresco* (verde, GPIO3) descarga la cola de MQTT y hace un refresco completo. Los tres despiertan el dispositivo del deep sleep, y tras cada pulsación sigue 3 s despierto por si se pulsa otra vez. Los GPIO se cambian en `menuconfig`.
+- **Botones físicos**. *Anterior* (izquierdo, GPIO5) y *siguiente* (central, GPIO4) recorren las imágenes guardadas, saltando los huecos vacíos y dando la vuelta, sin conectarse a la WiFi. *Refresco* (verde, GPIO3) descarga la cola de MQTT y hace un refresco completo. Los tres despiertan el dispositivo del deep sleep, y tras despertar por un botón sigue 3 s despierto por si se pulsa otra vez. Los GPIO se cambian en `menuconfig`.
 - **Refresco parcial incluso tras deep sleep**. El último frame se guarda en LittleFS y, al despertar, se carga como imagen de referencia del controlador mediante un [parche del driver](#parche-del-driver-uc8179).
 - **Refresco completo cuando conviene**. Se hace uno tras cualquier reinicio que no sea un deep sleep, cada 10 refrescos parciales, cada 24 h o si el frame guardado no es fiable; así se limpian los restos que deja el parcial.
 - **Sin refrescos innecesarios**. Si la imagen resultante es idéntica a la que ya hay en pantalla, no se refresca.
 - **MQTT con TLS y usuario**. Admite `mqtts://` con la CA propia del broker incrustada en el firmware ([`main/certs/`](main/certs/README.md)) o con el bundle de CAs públicas, y usuario y contraseña. Los fallos de TLS y de autenticación se explican en el log.
+- **WiFi rápida**. Al despertar conecta directamente al canal y BSSID del AP de la última conexión (guardados en memoria RTC), sin escanear; admite canal fijo e IP estática para no depender del DHCP, no escribe en NVS en cada conexión y desactiva el ahorro de energía del módem durante los pocos segundos que está conectado. Si el AP guardado falla, vuelve a buscarlo.
 - **Modo batería**. Despierta cada hora (configurable) o al pulsar un botón. Por tiempo, se conecta a la WiFi y a MQTT con sesión persistente, guarda las imágenes en cola, pinta si hace falta y vuelve a dormir. Pasar de imagen con los botones no adelanta ni retrasa la siguiente comprobación.
 - **Modo pruebas** (opcional). No usa deep sleep: se queda conectado, guarda cada imagen en cuanto llega y atiende los botones al momento.
 - **Pantallas de estado**. «Esperando imágenes» o «Sin conexión» cuando aún no hay ninguna imagen guardada.
@@ -48,7 +49,6 @@ Los declara [`main/idf_component.yml`](main/idf_component.yml) y ESP-IDF los des
 - [`cleishm/idfxx`](https://github.com/cleishm/idfxx): wrappers C++ para ESP-IDF (SPI, gráficos, fuentes y [driver UC8179](https://components.espressif.com/components/cleishm/idfxx_epaper_uc8179)). La fuente es [Spleen](https://github.com/fcambus/spleen).
 - [`espressif/mqtt`](https://components.espressif.com/components/espressif/mqtt): cliente MQTT.
 - [`joltwallet/littlefs`](https://components.espressif.com/components/joltwallet/littlefs): sistema de ficheros para guardar el último frame.
-- `protocol_examples_common` (incluido en ESP-IDF): conexión WiFi.
 
 ## Instalación
 
@@ -81,7 +81,16 @@ cd epaper-home
 idf.py menuconfig
 ```
 
-- **Example Connection Configuration**: SSID y contraseña de la WiFi (solo 2,4 GHz).
+- **WiFi**:
+
+| Opción | Por defecto | |
+|---|---|---|
+| SSID / Contraseña | vacíos | solo 2,4 GHz; con contraseña se exige WPA2 o superior |
+| Canal del AP | 0 (buscar en todos) | si el router tiene el canal fijo, ponlo: ahorra el escaneo cuando no hay AP guardado |
+| Intentos buscando el AP | 2 | hasta 10 s cada uno, tras probar 3 s el AP guardado |
+| IP estática | vacía (DHCP) | p. ej. `192.168.1.51`; tiene que estar **fuera del rango del DHCP** del router |
+| Máscara / Puerta de enlace / DNS | `255.255.255.0` / `192.168.1.1` / la puerta de enlace | solo con IP estática; el DNS solo hace falta si el broker va por nombre |
+
 - **ePaper MQTT**:
 
 | Opción | Por defecto | |
@@ -93,10 +102,10 @@ idf.py menuconfig
 | Topic donde publica su estado | `reterminal/estado` | vacío = no publica |
 | Número de imágenes | 10 | índices 0 a N−1, hasta 255; 48 KB cada una |
 | GPIO anterior / siguiente / refresco | 5 / 4 / 3 | si «anterior» y «siguiente» van al revés, intercambia 5 y 4 |
-| Ms despierto esperando otra pulsación | 3000 | |
+| Ms despierto esperando otra pulsación | 3000 | solo tras despertar por un botón |
 | Modo pruebas: no dormir nunca | desactivado | solo para desarrollo |
 | Segundos en deep sleep | 3600 (1 h) | cada cuánto comprueba si hay imágenes nuevas |
-| Ms esperando mensajes | 2000 | sin mensajes nuevos para dar la cola (o los retenidos) por recibida |
+| Ms esperando mensajes | 1000 | sin mensajes nuevos para dar la cola (o los retenidos) por recibida |
 | Segundos máximos para conectar | 20 | |
 | Parciales antes de un completo | 10 | |
 | Horas máximas sin completo | 24 | |
@@ -161,7 +170,7 @@ mosquitto_pub -h test.mosquitto.org -t reterminal/imagen/0 -q 1 -r -n   # y borr
 mosquitto_sub -h test.mosquitto.org -t reterminal/estado -C 1            # último estado del dispositivo
 ```
 
-Con un broker con TLS y usuario, añade a `mosquitto_pub` las opciones `-p 8883 --cafile main/certs/mqtt_ca.crt -u <usuario> -P <contraseña>`. El usuario que publica necesita permiso de **escritura** en `reterminal/imagen/<índice>` (en el ACL se puede limitar cada servicio a su hueco, p. ej. `topic write reterminal/imagen/0`).
+Con un broker con TLS y usuario, añade a `mosquitto_pub` las opciones `-p 8883 --cafile main/certs/mqtt_ca.crt -u <usuario> -P <contraseña>` (`enviar_imagen.py` no usa `-P`, para que la contraseña no se vea en `ps`: se la pasa a `mosquitto_pub` en un fichero de configuración temporal). El usuario que publica necesita permiso de **escritura** en `reterminal/imagen/<índice>` (en el ACL se puede limitar cada servicio a su hueco, p. ej. `topic write reterminal/imagen/0`).
 
 **Publicar siempre con `-q 1` y `-r`.** Sin retener, un dispositivo que pierda la sesión no volvería a recibir esa imagen y la borraría en la siguiente sincronización completa. Los cambios llegan en el siguiente despertar (como mucho 1 h después, o al pulsar *refresco*).
 
@@ -173,10 +182,10 @@ El dispositivo se conecta siempre con el mismo *client id* (`reterminal-` + fina
 
 | Al conectar | Qué hace | Qué descarga |
 |---|---|---|
-| El broker conserva la sesión y su suscripción es la de este firmware (apuntada en `/lfs/sub.txt`) | **No** se vuelve a suscribir | Solo los cambios en cola; si no hay ninguno, 0 bytes |
-| Cualquier otro caso: primer arranque, flash borrada, sesión caducada, broker sin persistencia, cambio de prefijo | Se suscribe a `<prefijo>/+` | Todos los retenidos (el estado completo). Las que no han cambiado no se reescriben, y se borran los huecos que ya no están en el broker |
+| El broker conserva la sesión y su suscripción es la de este firmware (filtro y número de huecos, apuntados en `/lfs/sub.txt`) | **No** se vuelve a suscribir | Solo los cambios en cola; si no hay ninguno, 0 bytes |
+| Cualquier otro caso: primer arranque, flash borrada, sesión caducada, broker sin persistencia, cambio de prefijo o de número de imágenes, imagen guardada corrupta | Se suscribe a `<prefijo>/+` | Todos los retenidos (el estado completo). Las que no han cambiado no se reescriben, y se borran los huecos que ya no están en el broker |
 
-`/lfs/sub.txt` solo se escribe cuando una sincronización completa termina con la conexión abierta: si se corta a mitad, el siguiente despertar empieza otra.
+`/lfs/sub.txt` se borra al empezar una sincronización completa y solo se vuelve a escribir cuando termina con la conexión abierta y sin errores: si se corta a mitad o falta memoria para alguna imagen, no se borra ningún hueco y el siguiente despertar empieza otra. Si el broker rechaza la suscripción (SUBACK `0x80`, normalmente por el ACL), no se toca nada y el log lo dice. Solo vale un topic por hueco: `reterminal/imagen/07` se ignora (es `reterminal/imagen/7`).
 
 En Mosquitto conviene `persistence true` (para que la cola sobreviva a un reinicio del broker) y, opcionalmente, `persistent_client_expiration 30d` para que no se acumulen sesiones de dispositivos que ya no existen: si la de este caduca, el siguiente despertar hace una sincronización completa.
 

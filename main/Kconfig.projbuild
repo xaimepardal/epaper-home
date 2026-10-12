@@ -1,3 +1,59 @@
+menu "WiFi"
+
+    config WIFI_SSID
+        string "SSID"
+        default ""
+        help
+            Sólo 2,4 GHz.
+
+    config WIFI_CLAVE
+        string "Contraseña (vacía = red abierta)"
+        default ""
+        help
+            Se guarda en sdkconfig (no versionado). Con contraseña se exige
+            WPA2 o superior.
+
+    config WIFI_CANAL
+        int "Canal del AP (0 = buscar en todos)"
+        range 0 13
+        default 0
+        help
+            Si el router tiene el canal fijo, indicarlo evita escanear los 13
+            canales cuando no hay AP guardado (primer arranque o tras un fallo).
+            En los despertares normales se conecta directamente al canal y
+            BSSID de la última conexión buena.
+
+    config WIFI_INTENTOS
+        int "Intentos buscando el AP"
+        range 1 10
+        default 2
+        help
+            Cada intento espera hasta 10 s. Antes se prueba el AP guardado
+            (3 s como mucho).
+
+    config WIFI_IP
+        string "IP estática (vacía = DHCP)"
+        default ""
+        help
+            Sin DHCP la conexión es más rápida. Tiene que estar fuera del
+            rango que reparte el DHCP del router (o reservada para este equipo).
+
+    config WIFI_MASCARA
+        string "Máscara de red (con IP estática)"
+        default "255.255.255.0"
+
+    config WIFI_GATEWAY
+        string "Puerta de enlace (con IP estática)"
+        default "192.168.1.1"
+
+    config WIFI_DNS
+        string "Servidor DNS (vacío = la puerta de enlace)"
+        default ""
+        help
+            Sólo hace falta si el broker se indica por nombre y no por IP.
+
+endmenu
+
 menu "ePaper MQTT"
 
     config BROKER_URI
@@ -64,18 +120,18 @@ menu "ePaper MQTT"
         int "Milisegundos despierto esperando otra pulsación"
         default 3000
         help
-            Tras pasar de imagen se queda despierto este tiempo por si se
-            vuelve a pulsar, para no tener que despertar otra vez.
+            Tras despertar por un botón se queda despierto este tiempo por si
+            se vuelve a pulsar, para no tener que despertar otra vez.
 
     config SIN_DEEP_SLEEP
         bool "Modo pruebas: no dormir nunca"
         default n
         help
             Se queda conectado, guarda cada imagen en cuanto llega y atiende
-            los botones al momento. Cada
-            pintado sigue el mismo camino que tras un deep sleep (reset del
-            panel + restore_baseline + parcial), así que sirve para probarlo
-            sin esperar. Gasta mucha batería: sólo para desarrollo.
+            los botones al momento. Cada pintado sigue el mismo camino que tras
+            un deep sleep (reset del panel + restore_baseline + parcial), así
+            que sirve para probarlo sin esperar. Gasta mucha batería: sólo para
+            desarrollo.
 
     config INTERVALO_S
         int "Segundos en deep sleep entre comprobaciones"
@@ -83,12 +139,12 @@ menu "ePaper MQTT"
         default 3600
         help
             Cada despertar conecta WiFi y MQTT, recoge las imágenes en cola y
-            vuelve a dormir. Los botones despiertan además en cualquier momento. Menos segundos = más rápido en reaccionar, más
-            consumo.
+            vuelve a dormir. Los botones despiertan además en cualquier
+            momento. Menos segundos = más rápido en reaccionar, más consumo.
 
     config VENTANA_MS
         int "Milisegundos esperando mensajes tras suscribirse"
-        default 2000
+        default 1000
         help
             Tiempo sin mensajes nuevos que se da por vaciada la cola de la
             sesión persistente (o terminada la entrega de los retenidos en una
