@@ -206,7 +206,7 @@ menu "ePaper MQTT"
 
     config QUEUE_WINDOW_MS
         int "Milisegundos esperando mensajes tras suscribirse"
-        default 1000
+        default 500
         help
             Tiempo sin mensajes nuevos que se da por vaciada la cola de la
             sesión persistente (o terminada la entrega de los retenidos en una

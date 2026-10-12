@@ -14,3 +14,8 @@ CONFIG_SPIRAM_IGNORE_NOTFOUND=y
 # CONFIG_SPIRAM_MEMTEST is not set
 # app_main: LittleFS, pintado, JSON de estado y WiFi en la misma pila
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+# Despertares más cortos: la CPU a 240 MHz acorta el handshake TLS (ECDHE/ECDSA
+# por software en el S3), y SNTP pregunta en cuanto hay red en vez de esperar
+# un retardo aleatorio de hasta 5 s.
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+# CONFIG_LWIP_SNTP_STARTUP_DELAY is not set

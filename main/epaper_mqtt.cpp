@@ -1548,6 +1548,14 @@ extern "C" void app_main()
     // encendida esperando una pulsación que casi nunca llega), pero se atiende
     // lo que se haya pulsado mientras tanto.
     handle_buttons(lfs, b != button::none ? CONFIG_BUTTON_WINDOW_MS : 0);
+    // Si la comprobación por tiempo vence ya (o en unos segundos), se hace en
+    // este despertar en vez de dormir 1 s y arrancar otra vez sólo para ella
+    if (!attempted && time(nullptr) + 5 >= rtc.t_next_check) {
+        wakeup_cause = "temporizador";
+        sync_mqtt();
+        show(lfs, notice(), false);
+        handle_buttons(lfs, 0);  // lo pulsado mientras tanto
+    }
     end_painting(lfs);
     const bool released = wait_for_release();
     disconnect_network(mqtt_client);
