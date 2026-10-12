@@ -120,6 +120,7 @@ struct rtc_state {
     uint32_t partials;   // parciales desde el último completo
     time_t t_full;        // último refresco completo
     time_t t_next_check;     // próxima comprobación de MQTT
+    time_t t_last_ntp;       // última hora correcta por SNTP (0 = nunca en este arranque)
     net_state network;
     int8_t battery;       // % que se muestra (múltiplo de 5), -1 = sin medida válida
     int16_t battery_mv;   // última medida, para el estado MQTT (-1 = falló)
@@ -754,12 +755,40 @@ static std::string format_time(time_t t, const char *fmt)
 
 static bool sntp_started;
 
+// Hora del RTC y del temporizador al pedir SNTP, para medir cuánto corrige
+static time_t sntp_rtc_at_start;
+static int64_t sntp_us_at_start;
+
+static void on_time_sync(struct timeval *tv)
+{
+    // Lo que diría el RTC ahora frente a lo que dice el servidor: la deriva
+    // acumulada desde la última sincronización
+    const int64_t rtc_now_ms = sntp_rtc_at_start * 1000LL + (esp_timer_get_time() - sntp_us_at_start) / 1000;
+    const int64_t correction_ms = tv->tv_sec * 1000LL + tv->tv_usec / 1000 - rtc_now_ms;
+    if (rtc.t_last_ntp > 0) {
+        ESP_LOGI(TAG, "SNTP: hora corregida %+lld ms tras %lld min sin sincronizar", (long long)correction_ms,
+                 (long long)(tv->tv_sec - rtc.t_last_ntp) / 60);
+    } else {
+        ESP_LOGI(TAG, "SNTP: hora puesta");
+    }
+    rtc.t_last_ntp = tv->tv_sec;
+}
+
+// SNTP sólo si no hay hora real o la última sincronización tiene más de
+// NTP_EVERY_H horas: entre medias el RTC la mantiene durante el deep sleep
 static void start_sntp()
 {
     if (sntp_started) {
         return;
     }
+    const time_t now = time(nullptr);
+    if (clock_valid() && rtc.t_last_ntp > 0 && now - rtc.t_last_ntp < CONFIG_NTP_EVERY_H * 3600) {
+        return;
+    }
     esp_sntp_config_t cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG(CONFIG_NTP_SERVER);
+    cfg.sync_cb = on_time_sync;
+    sntp_rtc_at_start = now;
+    sntp_us_at_start = esp_timer_get_time();
     if (esp_netif_sntp_init(&cfg) == ESP_OK) {
         sntp_started = true;
     } else {

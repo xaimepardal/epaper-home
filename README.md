@@ -24,7 +24,7 @@ Firmware para el **Seeed Studio reTerminal E1001** (ESP32-S3 + ePaper monocromo 
 - **MQTT con TLS y usuario**. Admite `mqtts://` con la CA propia del broker incrustada en el firmware ([`main/certs/`](main/certs/README.md)) o con el bundle de CAs públicas, y usuario y contraseña. Los fallos de TLS y de autenticación se explican en el log.
 - **WiFi rápida**. Al despertar conecta directamente al canal y BSSID del AP de la última conexión (guardados en memoria RTC), sin escanear; admite canal fijo e IP estática para no depender del DHCP, no escribe en NVS en cada conexión y desactiva el ahorro de energía del módem durante los pocos segundos que está conectado. Si el AP guardado falla, vuelve a buscarlo.
 - **Modo batería**. Despierta para comprobar a **horas exactas del reloj** (por defecto cada hora en punto; con 1800, a las :00 y :30) o al pulsar un botón. Por tiempo, se conecta a la WiFi y a MQTT con sesión persistente, guarda las imágenes en cola, pinta si hace falta y vuelve a dormir. Pasar de imagen con los botones no adelanta ni retrasa la siguiente comprobación; el botón de refresco hace una y la siguiente sigue siendo a la hora exacta.
-- **Hora por SNTP** en cada conexión (servidor y zona horaria configurables; por defecto `pool.ntp.org` y la hora peninsular española con cambio de horario). El RTC la mantiene durante el deep sleep y cada conexión corrige su deriva; si despierta unos segundos antes o después, esa comprobación cuenta como la de esa hora y no se repite.
+- **Hora por SNTP** cada 24 h (configurable; siempre que no haya hora, p. ej. tras un arranque en frío). El log muestra cuánto ha corregido respecto al RTC (servidor y zona horaria configurables; por defecto `pool.ntp.org` y la hora peninsular española con cambio de horario). El RTC la mantiene durante el deep sleep y cada conexión corrige su deriva; si despierta unos segundos antes o después, esa comprobación cuenta como la de esa hora y no se repite.
 - **Modo pruebas** (opcional). No usa deep sleep: se queda conectado, guarda cada imagen en cuanto llega y atiende los botones al momento. Si no hay WiFi, la reintenta cada minuto.
 - **Pantallas de estado**. «Esperando imágenes» o «Sin conexión» cuando aún no hay ninguna imagen guardada.
 - **PSRAM de 8 MB**. Activada en modo Octal; los bloques de más de 16 KB (framebuffers, mensajes MQTT) van a ella y la RAM interna queda para la WiFi y el TLS. Si no se detecta, arranca sin ella. Sin test de memoria al arrancar, que se repetiría en cada despertar. Ver [Comprobar la PSRAM](#comprobar-la-psram).
@@ -120,6 +120,7 @@ idf.py menuconfig
 | Modo pruebas: no dormir nunca | desactivado | solo para desarrollo |
 | Segundos entre comprobaciones | 3600 (1 h) | alineadas al reloj desde la medianoche local: 3600 = en punto, 1800 = :00 y :30; mejor un divisor de 24 h |
 | Servidor NTP | `pool.ntp.org` | por nombre necesita DNS (con IP estática, el router); vale una IP |
+| Horas entre sincronizaciones NTP | 24 | 0 = en cada conexión; si la corrección del log pasa de ~60 s, bájalo |
 | Zona horaria | `CET-1CEST,M3.5.0,M10.5.0/3` | formato POSIX TZ |
 | Ms esperando mensajes | 500 | sin mensajes nuevos para dar la cola (o los retenidos) por recibida |
 | Segundos máximos para conectar | 20 | |
