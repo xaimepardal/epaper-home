@@ -53,12 +53,10 @@ static void event_handler(void *, esp_event_base_t base, int32_t id, void *data)
         if (reconnect) {
             esp_wifi_connect();
         }
-    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_CONNECTED && STATIC_IP) {
-        // El handler por defecto de esp_netif (registrado antes) ya ha levantado
-        // la interfaz con la IP fija
-        connected = true;
-        xEventGroupSetBits(events, BIT_READY);
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+        // También con IP estática: esp_netif lo publica al levantar la interfaz
+        // (esp_netif_handlers.c). No vale WIFI_EVENT_STA_CONNECTED: este handler
+        // (ESP_EVENT_ANY_ID) se ejecuta antes que el de esp_netif para ese id.
         connected = true;
         xEventGroupSetBits(events, BIT_READY);
     }
@@ -98,10 +96,15 @@ static bool try_connect(bool direct, int timeout_ms)
     } else {
         cfg.sta.channel = CONFIG_WIFI_CHANNEL;  // 0 = todos
     }
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &cfg));
-
+    // Sin ESP_ERROR_CHECK: si el intento anterior sigue a medias devuelve
+    // ESP_ERR_WIFI_STATE, y eso no debe abortar
+    esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &cfg);
     xEventGroupClearBits(events, BIT_READY | BIT_FAILED);
-    if (esp_wifi_connect() != ESP_OK) {
+    if (err == ESP_OK) {
+        err = esp_wifi_connect();
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "No se pudo iniciar la conexión: %s", esp_err_to_name(err));
         return false;
     }
     const EventBits_t bits = xEventGroupWaitBits(events, BIT_READY | BIT_FAILED, pdFALSE, pdFALSE,
@@ -115,12 +118,23 @@ static bool try_connect(bool direct, int timeout_ms)
         }
         return true;
     }
-    esp_wifi_disconnect();
+    if (!(bits & BIT_FAILED)) {
+        // Se agotó el tiempo a mitad de la asociación: cortarla y esperar a que
+        // termine, para que su DISCONNECTED no llegue durante el intento siguiente
+        xEventGroupClearBits(events, BIT_FAILED);
+        esp_wifi_disconnect();
+        xEventGroupWaitBits(events, BIT_FAILED, pdTRUE, pdFALSE, pdMS_TO_TICKS(1000));
+    }
     return false;
 }
 
-bool wifi_connect()
+// Inicialización de la pila de red y de la WiFi: una sola vez por arranque
+static void init_once()
 {
+    static bool initialized;
+    if (initialized) {
+        return;
+    }
     esp_err_t err = nvs_flash_init();  // la WiFi guarda ahí la calibración RF
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -141,9 +155,17 @@ bool wifi_connect()
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, event_handler, nullptr));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, event_handler, nullptr));
-    ESP_ERROR_CHECK(esp_wifi_start());
-    started = true;
-    esp_wifi_set_ps(WIFI_PS_NONE);
+    initialized = true;
+}
+
+bool wifi_connect()
+{
+    init_once();
+    if (!started) {
+        ESP_ERROR_CHECK(esp_wifi_start());
+        started = true;
+        esp_wifi_set_ps(WIFI_PS_NONE);
+    }
 
     bool ok = false;
     if (cache.magic == CACHE_MAGIC) {

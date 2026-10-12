@@ -4,7 +4,7 @@
 // fijo y BSSID del último AP en memoria RTC), IP estática opcional y sin
 // escrituras en NVS. Sustituye a example_connect().
 
-// Conecta y espera a tener IP. Se puede llamar una sola vez por arranque.
+// Conecta y espera a tener IP. Si falla se puede volver a llamar (reintento).
 bool wifi_connect();
 
 // Apaga la WiFi si se llegó a iniciar (seguro de llamar siempre).
