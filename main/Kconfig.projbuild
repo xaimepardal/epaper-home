@@ -4,25 +4,75 @@ menu "ePaper MQTT"
         string "URI del broker MQTT"
         default "mqtt://test.mosquitto.org"
         help
-            Ej: mqtt://192.168.1.10, mqtt://usuario:clave@host:1883
+            mqtt://host[:1883] sin cifrar, o mqtts://host[:8883] con TLS.
+            Con TLS el host tiene que figurar en el certificado del broker (CN o
+            SAN; puede ser una IP si el SAN la incluye). Para una CA propia,
+            copia su certificado en main/certs/mqtt_ca.crt.
 
-    config MQTT_TOPIC
-        string "Topic para texto"
-        default "reterminal/texto"
+    config MQTT_USUARIO
+        string "Usuario MQTT (vacío = anónimo)"
+        default ""
+
+    config MQTT_CLAVE
+        string "Contraseña MQTT"
+        default ""
+        help
+            Se guarda en sdkconfig (no versionado), como la contraseña WiFi.
 
     config MQTT_TOPIC_IMAGEN
-        string "Topic para imágenes"
+        string "Prefijo de los topics de imágenes"
         default "reterminal/imagen"
         help
-            Payload: zlib de 800x480 a 1 bit por píxel (48000 bytes sin
-            comprimir), filas de arriba abajo, MSB = píxel izquierdo,
-            bit 1 = blanco. Es lo que da Pillow con Image.convert("1").tobytes().
+            Cada imagen va en su propio topic, <prefijo>/<índice> (índice de 0 a
+            MAX_IMAGENES-1), retenida y con QoS 1. Payload: zlib de 800x480 a
+            1 bit por píxel (48000 bytes sin comprimir), filas de arriba abajo,
+            MSB = píxel izquierdo, bit 1 = blanco. Es lo que da Pillow con
+            Image.convert("1").tobytes(). Un retenido vacío borra esa imagen.
+
+    config MQTT_TOPIC_ESTADO
+        string "Topic donde publica su estado (vacío = no publica)"
+        default "reterminal/estado"
+        help
+            En cada conexión publica, retenido, un JSON con la versión del
+            firmware, la causa del despertar, la imagen seleccionada, los
+            huecos ocupados y el RSSI de la WiFi. El usuario MQTT necesita
+            permiso de escritura en este topic.
+
+    config MAX_IMAGENES
+        int "Número de imágenes (índices 0 .. N-1)"
+        range 1 255
+        default 10
+        help
+            Cada imagen ocupa 48 KB en LittleFS (~19,8 MB libres).
+
+    config BOTON_ANTERIOR_GPIO
+        int "GPIO del botón «anterior»"
+        default 5
+        help
+            reTerminal E1001: KEY2 (izquierdo) = GPIO5, KEY1 (central) = GPIO4,
+            KEY0 (verde) = GPIO3. Tienen que ser RTC GPIO (0-21) para despertar.
+
+    config BOTON_SIGUIENTE_GPIO
+        int "GPIO del botón «siguiente»"
+        default 4
+
+    config BOTON_REFRESCO_GPIO
+        int "GPIO del botón de refresco"
+        default 3
+
+    config VENTANA_BOTONES_MS
+        int "Milisegundos despierto esperando otra pulsación"
+        default 3000
+        help
+            Tras pasar de imagen se queda despierto este tiempo por si se
+            vuelve a pulsar, para no tener que despertar otra vez.
 
     config SIN_DEEP_SLEEP
         bool "Modo pruebas: no dormir nunca"
         default n
         help
-            Se queda conectado y pinta cada mensaje en cuanto llega. Cada
+            Se queda conectado, guarda cada imagen en cuanto llega y atiende
+            los botones al momento. Cada
             pintado sigue el mismo camino que tras un deep sleep (reset del
             panel + restore_baseline + parcial), así que sirve para probarlo
             sin esperar. Gasta mucha batería: sólo para desarrollo.
@@ -30,18 +80,19 @@ menu "ePaper MQTT"
     config INTERVALO_S
         int "Segundos en deep sleep entre comprobaciones"
         range 10 86400
-        default 300
+        default 3600
         help
-            Cada despertar conecta WiFi y MQTT, recoge el último mensaje y
-            vuelve a dormir. Menos segundos = más rápido en reaccionar, más
+            Cada despertar conecta WiFi y MQTT, recoge las imágenes en cola y
+            vuelve a dormir. Los botones despiertan además en cualquier momento. Menos segundos = más rápido en reaccionar, más
             consumo.
 
     config VENTANA_MS
         int "Milisegundos esperando mensajes tras suscribirse"
         default 2000
         help
-            Tiempo de espera para que el broker entregue los mensajes
-            retenidos o pendientes de la sesión persistente.
+            Tiempo sin mensajes nuevos que se da por vaciada la cola de la
+            sesión persistente (o terminada la entrega de los retenidos en una
+            sincronización completa).
 
     config TIMEOUT_CONEXION_S
         int "Segundos máximos para conectar al broker"

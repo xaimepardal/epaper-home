@@ -6,6 +6,9 @@ managed_components/
 sdkconfig
 sdkconfig.old
 
+# CA del broker MQTT (main/certs/README.md)
+main/certs/*.crt
+
 # Python
 __pycache__/
 *.pyc

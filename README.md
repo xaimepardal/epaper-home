@@ -1,20 +1,23 @@
 # epaper-home
 
-Firmware para el **Seeed Studio reTerminal E1001** (ESP32-S3 + ePaper monocromo de 7,5" y 800×480) que muestra en la pantalla **texto o imágenes recibidos por MQTT**. Está pensado para funcionar con batería: el dispositivo pasa la mayor parte del tiempo en deep sleep y, al actualizar, usa refresco parcial (sin parpadeo).
+Firmware para el **Seeed Studio reTerminal E1001** (ESP32-S3 + ePaper monocromo de 7,5" y 800×480) que funciona como **galería de imágenes recibidas por MQTT**, con los botones para pasar de una a otra. Está pensado para funcionar con batería: el dispositivo pasa la mayor parte del tiempo en deep sleep y, al actualizar, usa refresco parcial (sin parpadeo).
 
 ## Funciones
 
-- **Texto por MQTT** (`reterminal/texto`). Ajusta las líneas por palabras, respeta los `\n` y usa la fuente Spleen 8×16 a escala ×3 (32 columnas × 9 filas).
-- **Imágenes por MQTT** (`reterminal/imagen`). Recibe imágenes de 800×480 a 1 bit comprimidas con zlib; el ESP32 las descomprime con el *inflate* de su ROM y descarta las que lleguen corruptas. Formato en [Formato de las imágenes](#formato-de-las-imágenes).
-- **Prioridad de mensajes**. La pantalla muestra lo último que llegue, sea texto o imagen.
+- **Imágenes por MQTT** (`reterminal/imagen/<índice>`). Cada imagen va **retenida en su propio topic**, con el índice (0 a 9 por defecto) al final, y se guarda en ese hueco de LittleFS, sustituyendo a la anterior. Son imágenes de 800×480 a 1 bit comprimidas con zlib; el ESP32 las descomprime con el *inflate* de su ROM y descarta las que lleguen corruptas. Un retenido vacío borra esa imagen. Formato en [Formato de las imágenes](#formato-de-las-imágenes).
+- **Solo descarga lo que cambia, y se recupera solo**. Los retenidos del broker son el estado completo; la sesión persistente guarda en cola los cambios mientras el dispositivo duerme. Ver [Sincronización](#sincronización).
+- **Estado en MQTT** (`reterminal/estado`). En cada conexión publica, retenido, un JSON con la versión del firmware, la causa del despertar, la imagen seleccionada, los huecos ocupados y el RSSI de la WiFi.
+- **Imagen seleccionada**. La pantalla muestra siempre la imagen del índice seleccionado, que se guarda en LittleFS y sobrevive a reinicios. Al llegar imágenes nuevas no se cambia de índice; solo se repinta si llega una nueva versión de la que se está viendo. Si se borra la seleccionada, pasa a la siguiente que exista.
+- **Botones físicos**. *Anterior* (izquierdo, GPIO5) y *siguiente* (central, GPIO4) recorren las imágenes guardadas, saltando los huecos vacíos y dando la vuelta, sin conectarse a la WiFi. *Refresco* (verde, GPIO3) descarga la cola de MQTT y hace un refresco completo. Los tres despiertan el dispositivo del deep sleep, y tras cada pulsación sigue 3 s despierto por si se pulsa otra vez. Los GPIO se cambian en `menuconfig`.
 - **Refresco parcial incluso tras deep sleep**. El último frame se guarda en LittleFS y, al despertar, se carga como imagen de referencia del controlador mediante un [parche del driver](#parche-del-driver-uc8179).
 - **Refresco completo cuando conviene**. Se hace uno tras cualquier reinicio que no sea un deep sleep, cada 10 refrescos parciales, cada 24 h o si el frame guardado no es fiable; así se limpian los restos que deja el parcial.
 - **Sin refrescos innecesarios**. Si la imagen resultante es idéntica a la que ya hay en pantalla, no se refresca.
-- **Modo batería**. Despierta cada 5 min, se conecta a la WiFi y a MQTT con sesión persistente, recoge el último mensaje (retenido o en cola QoS 1), pinta si hace falta y vuelve a dormir.
-- **Modo pruebas** (opcional). No usa deep sleep: se queda conectado y pinta cada mensaje en cuanto llega.
-- **Pantallas de estado**. «Esperando mensajes» o «Sin conexión» cuando aún no hay nada que mostrar.
+- **MQTT con TLS y usuario**. Admite `mqtts://` con la CA propia del broker incrustada en el firmware ([`main/certs/`](main/certs/README.md)) o con el bundle de CAs públicas, y usuario y contraseña. Los fallos de TLS y de autenticación se explican en el log.
+- **Modo batería**. Despierta cada hora (configurable) o al pulsar un botón. Por tiempo, se conecta a la WiFi y a MQTT con sesión persistente, guarda las imágenes en cola, pinta si hace falta y vuelve a dormir. Pasar de imagen con los botones no adelanta ni retrasa la siguiente comprobación.
+- **Modo pruebas** (opcional). No usa deep sleep: se queda conectado, guarda cada imagen en cuanto llega y atiende los botones al momento.
+- **Pantallas de estado**. «Esperando imágenes» o «Sin conexión» cuando aún no hay ninguna imagen guardada.
 - **Volcado de fallos** en la partición `coredump`, que se lee con `idf.py coredump-info`.
-- **Herramienta de PC** [`tools/enviar_imagen.py`](tools/enviar_imagen.py). Convierte cualquier imagen (PNG, JPG…) al formato del panel, con tramado o umbral, y la publica.
+- **Herramienta de PC** [`tools/enviar_imagen.py`](tools/enviar_imagen.py). Convierte cualquier imagen (PNG, JPG…) al formato del panel, con tramado o umbral, y la publica en el índice indicado; también borra índices.
 
 ## Hardware
 
@@ -25,7 +28,7 @@ Firmware para el **Seeed Studio reTerminal E1001** (ESP32-S3 + ePaper monocromo 
 | Pantalla | ePaper 7,5" monocromo, 800×480, controlador UC8179 (panel GDEY075T7) |
 | Conexión al PC | USB-C (conversor USB-serie: aparece como `/dev/ttyUSB0` en Linux) |
 
-Pines que usa el firmware: SPI de la pantalla con MOSI en 9, SCLK en 7, CS en 10, DC en 11, RESET en 12 y BUSY en 13. La microSD comparte el bus, así que se desactiva con SD_EN en 16 y SD_CS en 14.
+Pines que usa el firmware: SPI de la pantalla con MOSI en 9, SCLK en 7, CS en 10, DC en 11, RESET en 12 y BUSY en 13. La microSD comparte el bus, así que se desactiva con SD_EN en 16 y SD_CS en 14. Botones (activos a nivel bajo, con pull-up en la placa): KEY0 verde en 3, KEY1 central en 4 y KEY2 izquierdo en 5, según la [wiki de periféricos](https://wiki.seeedstudio.com/reterminal_e10xx_with_arduino_peripherals/).
 
 ## Requisitos para compilar y flashear
 
@@ -83,17 +86,42 @@ idf.py menuconfig
 
 | Opción | Por defecto | |
 |---|---|---|
-| URI del broker MQTT | `mqtt://test.mosquitto.org` | p. ej. `mqtt://usuario:clave@192.168.1.10` |
-| Topic para texto | `reterminal/texto` | |
-| Topic para imágenes | `reterminal/imagen` | |
+| URI del broker MQTT | `mqtt://test.mosquitto.org` | `mqtt://host:1883` sin cifrar o `mqtts://host:8883` con TLS ([ver abajo](#broker-con-tls-y-ca-propia)) |
+| Usuario MQTT | vacío (anónimo) | |
+| Contraseña MQTT | vacío | se guarda en `sdkconfig` |
+| Prefijo de los topics de imágenes | `reterminal/imagen` | cada imagen en `<prefijo>/<índice>` |
+| Topic donde publica su estado | `reterminal/estado` | vacío = no publica |
+| Número de imágenes | 10 | índices 0 a N−1, hasta 255; 48 KB cada una |
+| GPIO anterior / siguiente / refresco | 5 / 4 / 3 | si «anterior» y «siguiente» van al revés, intercambia 5 y 4 |
+| Ms despierto esperando otra pulsación | 3000 | |
 | Modo pruebas: no dormir nunca | desactivado | solo para desarrollo |
-| Segundos en deep sleep | 300 | cada cuánto comprueba si hay mensajes |
-| Ms esperando mensajes | 2000 | tras suscribirse |
+| Segundos en deep sleep | 3600 (1 h) | cada cuánto comprueba si hay imágenes nuevas |
+| Ms esperando mensajes | 2000 | sin mensajes nuevos para dar la cola (o los retenidos) por recibida |
 | Segundos máximos para conectar | 20 | |
 | Parciales antes de un completo | 10 | |
 | Horas máximas sin completo | 24 | |
 
-> ⚠️ La configuración se guarda en `sdkconfig`, **que contiene la contraseña WiFi**. Está en `.gitignore`: no lo subas al repositorio.
+> ⚠️ La configuración se guarda en `sdkconfig`, **que contiene las contraseñas de la WiFi y de MQTT**. Está en `.gitignore`: no lo subas al repositorio.
+
+### Broker con TLS y CA propia
+
+Por ejemplo, el Mosquitto de un NAS con certificado firmado por una CA propia:
+
+1. Copia el certificado de la CA (solo `ca.crt`, nunca la clave) en **`main/certs/mqtt_ca.crt`**. Está en `.gitignore`. Al compilar debe aparecer `MQTT: CA propia …`.
+2. En `menuconfig` → *ePaper MQTT*:
+   - **URI:** `mqtts://<host>:8883`. El host tiene que figurar en el certificado del broker (CN o SAN). Puede ser una IP si el SAN la incluye; es lo más fiable, porque no depende del DNS de la red.
+   - **Usuario y contraseña:** los de un usuario que pueda **leer** `reterminal/imagen/#` y **escribir** `reterminal/estado` (en el ACL de Mosquitto: `topic read reterminal/imagen/#` y `topic write reterminal/estado`).
+3. Compila y flashea. En el monitor debe salir `Conectado al broker`.
+
+Si falla, el log dice por qué:
+
+| Mensaje | Causa probable |
+|---|---|
+| `Error de transporte: esp-tls 0x…, mbedtls -0x2700` | El certificado no valida: falta la CA correcta en `main/certs/` o el host del URI no está en el certificado. |
+| `Error de transporte: … errno 113/111` | No llega al broker: IP o puerto incorrectos, o un cortafuegos. |
+| `El broker rechaza la conexión: código 0x4` / `0x5` | Usuario o contraseña incorrectos / sin permiso. |
+
+Sin `main/certs/mqtt_ca.crt`, `mqtts://` valida con el bundle de CAs públicas de ESP-IDF; sirve para brokers con certificado de Let's Encrypt.
 
 ### 4. Compilar y flashear
 
@@ -110,34 +138,64 @@ idf.py -p /dev/ttyUSB0 flash monitor
 
 ## Uso
 
-**Enviar texto:**
+**Enviar una imagen** (el primer argumento es el índice):
 
 ```bash
-mosquitto_pub -h test.mosquitto.org -t reterminal/texto -r -q 1 -m "Hola desde MQTT"
+tools/enviar_imagen.py 0 foto.jpg                    # tramado (fotos)
+tools/enviar_imagen.py 1 foto.jpg --host 192.168.1.50 --ca main/certs/mqtt_ca.crt --usuario admin   # broker con TLS
+tools/enviar_imagen.py 2 logo.png --umbral 128       # blanco/negro puro (texto, gráficos)
+tools/enviar_imagen.py 0 foto.jpg --previa prev.png  # solo previsualizar, sin publicar
 ```
 
-**Enviar una imagen:**
+**Borrar una imagen:**
 
 ```bash
-tools/enviar_imagen.py foto.jpg                    # tramado (fotos)
-tools/enviar_imagen.py logo.png --umbral 128       # blanco/negro puro (texto, gráficos)
-tools/enviar_imagen.py foto.jpg --previa prev.png  # solo previsualizar, sin publicar
+tools/enviar_imagen.py 2 --borrar
 ```
 
-**Dejar la pantalla en blanco:**
+**Imagen en blanco en el índice 0 sin la herramienta:**
 
 ```bash
-python3 -c "import zlib,sys; sys.stdout.buffer.write(zlib.compress(b'\xff'*48000))" | mosquitto_pub -h test.mosquitto.org -t reterminal/imagen -r -q 1 -s
+python3 -c "import zlib,sys; sys.stdout.buffer.write(zlib.compress(b'\xff'*48000))" | mosquitto_pub -h test.mosquitto.org -t reterminal/imagen/0 -q 1 -r -s
+mosquitto_pub -h test.mosquitto.org -t reterminal/imagen/0 -q 1 -r -n   # y borrarla
+mosquitto_sub -h test.mosquitto.org -t reterminal/estado -C 1            # último estado del dispositivo
 ```
 
-**Publicar siempre con `-r` (retenido) y `-q 1`.** El dispositivo pasa casi todo el tiempo dormido, y así recibe el mensaje en su siguiente despertar (como mucho 5 min después en modo batería). Si hay a la vez un texto y una imagen retenidos, ambos llegan en cada despertar; para evitarlo, `enviar_imagen.py` borra el texto retenido al publicar. Para borrar a mano un retenido, envía un mensaje vacío: `mosquitto_pub -h test.mosquitto.org -t reterminal/imagen -r -n`.
+Con un broker con TLS y usuario, añade a `mosquitto_pub` las opciones `-p 8883 --cafile main/certs/mqtt_ca.crt -u <usuario> -P <contraseña>`. El usuario que publica necesita permiso de **escritura** en `reterminal/imagen/<índice>` (en el ACL se puede limitar cada servicio a su hueco, p. ej. `topic write reterminal/imagen/0`).
+
+**Publicar siempre con `-q 1` y `-r`.** Sin retener, un dispositivo que pierda la sesión no volvería a recibir esa imagen y la borraría en la siguiente sincronización completa. Los cambios llegan en el siguiente despertar (como mucho 1 h después, o al pulsar *refresco*).
+
+**Botones:** *anterior* y *siguiente* cambian de imagen en un par de segundos (refresco parcial, sin red); *refresco* conecta, descarga lo pendiente y hace un refresco completo.
+
+## Sincronización
+
+El dispositivo se conecta siempre con el mismo *client id* (`reterminal-` + final de la MAC) y sesión persistente, y el broker guarda en la cola de esa sesión lo publicado con QoS 1 mientras duerme.
+
+| Al conectar | Qué hace | Qué descarga |
+|---|---|---|
+| El broker conserva la sesión y su suscripción es la de este firmware (apuntada en `/lfs/sub.txt`) | **No** se vuelve a suscribir | Solo los cambios en cola; si no hay ninguno, 0 bytes |
+| Cualquier otro caso: primer arranque, flash borrada, sesión caducada, broker sin persistencia, cambio de prefijo | Se suscribe a `<prefijo>/+` | Todos los retenidos (el estado completo). Las que no han cambiado no se reescriben, y se borran los huecos que ya no están en el broker |
+
+`/lfs/sub.txt` solo se escribe cuando una sincronización completa termina con la conexión abierta: si se corta a mitad, el siguiente despertar empieza otra.
+
+En Mosquitto conviene `persistence true` (para que la cola sobreviva a un reinicio del broker) y, opcionalmente, `persistent_client_expiration 30d` para que no se acumulen sesiones de dispositivos que ya no existen: si la de este caduca, el siguiente despertar hace una sincronización completa.
+
+### Migración desde el formato con el índice en el payload
+
+Las versiones anteriores usaban el topic `reterminal/image` con el índice en el primer byte. Tras actualizar:
+
+1. En `menuconfig`, cambia el prefijo a `reterminal/imagen` si tu `sdkconfig` conservaba el valor antiguo (un `sdkconfig` existente no recoge el nuevo valor por defecto).
+2. Vuelve a publicar las imágenes con `tools/enviar_imagen.py` (ahora retenidas). La primera conexión hace una sincronización completa y **borra los huecos que no estén en el broker**.
+3. Lo que siga llegando por la suscripción antigua de la sesión se ignora (se avisa en el log).
+
+**Botones:** *anterior* y *siguiente* cambian de imagen en un par de segundos (refresco parcial, sin red); *refresco* conecta, descarga lo pendiente y hace un refresco completo.
 
 ## Formato de las imágenes
 
 | | |
 |---|---|
-| Topic | `reterminal/imagen` |
-| Payload | zlib de 48 000 bytes, máximo 64 KB comprimido |
+| Topic | `reterminal/imagen/<índice>` (0 a N−1, en decimal), QoS 1, **retenido** |
+| Payload | zlib de 48 000 bytes, máximo 64 KB comprimido. Un retenido vacío borra esa imagen |
 | Píxeles | 800×480, 1 bit por píxel, filas de arriba abajo, el bit más significativo es el píxel izquierdo, **1 = blanco** |
 
 Es exactamente lo que produce Pillow:
@@ -151,8 +209,9 @@ payload = zlib.compress(Image.open("imagen.png").resize((800, 480)).convert("1")
 ## Estructura del proyecto
 
 ```
-main/epaper_mqtt.cpp      Firmware: MQTT, dibujo, refresco y deep sleep
+main/epaper_mqtt.cpp      Firmware: MQTT, galería, botones, refresco y deep sleep
 main/Kconfig.projbuild    Opciones de menuconfig "ePaper MQTT"
+main/certs/               CA propia del broker MQTT (opcional, no versionada)
 main/idf_component.yml    Dependencias del registro de componentes
 components/idfxx_epaper*  Copias parcheadas del driver ePaper (ver abajo)
 partitions.csv            Tabla de particiones para los 32 MB de flash
@@ -166,7 +225,7 @@ tools/enviar_imagen.py    Conversión y publicación de imágenes desde el PC
 | `nvs` | 24 KB | Credenciales y calibración WiFi |
 | `otadata` + `ota_0` + `ota_1` | 2 × 6 MB | Firmware (preparado para actualizaciones OTA) |
 | `coredump` | 64 KB | Volcado de fallos |
-| `storage` | ~19,8 MB | LittleFS: último frame pintado |
+| `storage` | ~19,8 MB | LittleFS: imágenes por índice (`imgNNN.bin`), índice seleccionado, último frame pintado y suscripción de la sesión (`sub.txt`) |
 
 ### Parche del driver UC8179
 
