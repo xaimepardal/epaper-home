@@ -15,7 +15,7 @@
 //
 // Refresco parcial tras deep sleep: el último frame pintado se guarda en
 // LittleFS y, al despertar, se carga en la RAM de "imagen anterior" del
-// controlador (restore_baseline, parche en components/idfxx_epaper*). Sólo se
+// controlador (panel::restore_baseline de idfxx, cleishm/idfxx#145). Sólo se
 // confía en ese frame si el ESP32 viene de deep sleep y el último pintado
 // terminó bien; en cualquier otro caso se hace un refresco completo.
 
@@ -688,7 +688,7 @@ static void paint(const idfxx::epaper::mono_framebuffer &frame, const idfxx::epa
         return;
     }
     if (!panel->ram_matches_glass) {
-        display.restore_baseline(*previous);  // RAM "anterior" = cristal
+        display.restore_baseline(*previous);  // RAM "anterior" y "nueva" = cristal
         display.write(frame);
     } else {
         const region r = changed_region(*previous, frame);

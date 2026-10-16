@@ -1,214 +1,246 @@
 dependencies:
-  cleishm/frequency:
-    component_hash: 51128c4b39ac8a3aab0ef20cfc48ed5a1396c60a530b6c71adc6ef25dd3e2333
-    dependencies: []
-    source:
-      registry_url: https://components.espressif.com/
-      type: service
-    version: 1.2.1
   cleishm/idfxx_core:
-    component_hash: 5d99234239f0500ef5b1dde14d3c3fcf22127157275a1e3ba1399e1773e57276
+    component_hash: 8692bc14192646bbff9d7ef118200177e8855eee70f706b5f08720f2ec6b1f90
     dependencies:
     - name: idf
-      require: private
       version: '>=5.5'
     source:
-      registry_url: https://components.espressif.com/
-      type: service
-    version: 1.1.1
+      git: https://github.com/cleishm/idfxx.git
+      path: components/idfxx_core
+      type: git
+    version: ae603b1c6c531bd0defbb57f226f0ba3981dd9c6
   cleishm/idfxx_epaper:
+    component_hash: 2c6a7b71b973e4609e70ecdce7f8c13ded8f2e8fd3f8efbadb98981d96d8376e
     dependencies:
-    - name: cleishm/idfxx_core
-      public: true
-      version: ^1.0.0
-    - name: cleishm/idfxx_gpio
-      public: true
-      version: ^1.0.0
     - name: idf
       version: '>=5.5'
+    - git: https://github.com/cleishm/idfxx.git
+      name: cleishm/idfxx_core
+      path: components/idfxx_core
+      public: true
+      version: ae603b1c6c531bd0defbb57f226f0ba3981dd9c6
+    - git: https://github.com/cleishm/idfxx.git
+      name: cleishm/idfxx_gpio
+      path: components/idfxx_gpio
+      public: true
+      version: ae603b1c6c531bd0defbb57f226f0ba3981dd9c6
     source:
+      git: https://github.com/cleishm/idfxx.git
       path: components/idfxx_epaper
-      type: local
-    version: 1.0.0
+      type: git
+    version: ae603b1c6c531bd0defbb57f226f0ba3981dd9c6
   cleishm/idfxx_epaper_uc8179:
+    component_hash: ec5081198a0b1582bf92ebd63f31bbf175a6b157df1c9106767266b0deb2cd01
     dependencies:
-    - name: cleishm/frequency
-      public: true
-      version: ^1.1.1
-    - name: cleishm/idfxx_core
-      public: true
-      version: ^1.0.0
-    - name: cleishm/idfxx_epaper
-      public: true
-      version: ^1.0.0
-    - name: cleishm/idfxx_gpio
-      public: true
-      version: ^1.0.0
-    - name: cleishm/idfxx_panel_io
-      public: true
-      version: ^1.0.0
     - name: idf
       version: '>=5.5'
+    - git: https://github.com/cleishm/idfxx.git
+      name: cleishm/idfxx_core
+      path: components/idfxx_core
+      public: true
+      version: ae603b1c6c531bd0defbb57f226f0ba3981dd9c6
+    - git: https://github.com/cleishm/idfxx.git
+      name: cleishm/idfxx_epaper
+      path: components/idfxx_epaper
+      public: true
+      version: ae603b1c6c531bd0defbb57f226f0ba3981dd9c6
+    - git: https://github.com/cleishm/idfxx.git
+      name: cleishm/idfxx_gpio
+      path: components/idfxx_gpio
+      public: true
+      version: ae603b1c6c531bd0defbb57f226f0ba3981dd9c6
+    - git: https://github.com/cleishm/idfxx.git
+      name: cleishm/idfxx_panel_io
+      path: components/idfxx_panel_io
+      public: true
+      version: ae603b1c6c531bd0defbb57f226f0ba3981dd9c6
+    - name: cleishm/quanta
+      public: true
+      version: ^0.1.0
     source:
+      git: https://github.com/cleishm/idfxx.git
       path: components/idfxx_epaper_uc8179
-      type: local
-    version: 1.0.0
+      type: git
+    version: ae603b1c6c531bd0defbb57f226f0ba3981dd9c6
   cleishm/idfxx_font:
-    component_hash: b63e51a039c5e62d2faa810379f2e7db5be581cd642f3dda7359b1475b4072f3
+    component_hash: f5b818553b5aa5f83a6e22f8722e9948472ba9b283c4c5bbb25e36f72270d14a
     dependencies:
     - name: idf
-      require: private
       version: '>=5.5'
     source:
-      registry_url: https://components.espressif.com
-      type: service
-    version: 1.0.0
+      git: https://github.com/cleishm/idfxx.git
+      path: components/idfxx_font
+      type: git
+    version: ae603b1c6c531bd0defbb57f226f0ba3981dd9c6
   cleishm/idfxx_font_spleen:
-    component_hash: dea5a3bec258b4333224ced53fa130b220924fdc5cbb94c900ad225ea669e47c
+    component_hash: 796e0344a01f612573dfa20fa1b9b630bdec9e5dae690d8826e570e0ca9f3bef
     dependencies:
-    - name: cleishm/idfxx_font
-      registry_url: https://components.espressif.com
-      require: public
-      version: ^1.0.0
     - name: idf
-      require: private
       version: '>=5.5'
+    - git: https://github.com/cleishm/idfxx.git
+      name: cleishm/idfxx_font
+      path: components/idfxx_font
+      public: true
+      version: ae603b1c6c531bd0defbb57f226f0ba3981dd9c6
     source:
-      registry_url: https://components.espressif.com/
-      type: service
-    version: 1.0.0
+      git: https://github.com/cleishm/idfxx.git
+      path: components/idfxx_font_spleen
+      type: git
+    version: ae603b1c6c531bd0defbb57f226f0ba3981dd9c6
   cleishm/idfxx_gfx:
-    component_hash: 8423d8739d27a00af2d0df6c7d4abfe517b26b5a5d4961633d4da5b21e7ac326
+    component_hash: 8c08e927d8114fb5fefc551332c9a8ffa6442e97759a0143c130c622b4552eea
     dependencies:
-    - name: cleishm/idfxx_core
-      registry_url: https://components.espressif.com
-      require: public
-      version: ^1.0.0
-    - name: cleishm/idfxx_font
-      registry_url: https://components.espressif.com
-      require: public
-      version: ^1.0.0
     - name: idf
-      require: private
       version: '>=5.5'
+    - git: https://github.com/cleishm/idfxx.git
+      name: cleishm/idfxx_core
+      path: components/idfxx_core
+      public: true
+      version: ae603b1c6c531bd0defbb57f226f0ba3981dd9c6
+    - git: https://github.com/cleishm/idfxx.git
+      name: cleishm/idfxx_font
+      path: components/idfxx_font
+      public: true
+      version: ae603b1c6c531bd0defbb57f226f0ba3981dd9c6
     source:
-      registry_url: https://components.espressif.com/
-      type: service
-    version: 1.0.1
+      git: https://github.com/cleishm/idfxx.git
+      path: components/idfxx_gfx
+      type: git
+    version: ae603b1c6c531bd0defbb57f226f0ba3981dd9c6
   cleishm/idfxx_gpio:
-    component_hash: f1a8181aa255aeaa3660fa29ad6da9ce08ad2f7df048e6abc844867ffa0897d3
+    component_hash: 3f57bf6481a4d2ca812948d2ad0380d98f154adee37b53ce2a36798c08e14f90
     dependencies:
-    - name: cleishm/idfxx_core
-      registry_url: https://components.espressif.com
-      require: public
-      version: ^1.0.0
-    - name: cleishm/idfxx_hw_support
-      registry_url: https://components.espressif.com
-      require: public
-      version: ^1.0.0
     - name: idf
-      require: private
       version: '>=5.5'
+    - git: https://github.com/cleishm/idfxx.git
+      name: cleishm/idfxx_core
+      path: components/idfxx_core
+      public: true
+      version: ae603b1c6c531bd0defbb57f226f0ba3981dd9c6
+    - git: https://github.com/cleishm/idfxx.git
+      name: cleishm/idfxx_hw_support
+      path: components/idfxx_hw_support
+      public: true
+      version: ae603b1c6c531bd0defbb57f226f0ba3981dd9c6
     source:
-      registry_url: https://components.espressif.com/
-      type: service
-    version: 1.0.1
+      git: https://github.com/cleishm/idfxx.git
+      path: components/idfxx_gpio
+      type: git
+    version: ae603b1c6c531bd0defbb57f226f0ba3981dd9c6
   cleishm/idfxx_hw_support:
-    component_hash: bb238467131e00e90804790b1d68cfd0898d5bf971643a5ff4c550ebb91e338a
+    component_hash: 826c286b1ca2dae3806fdf8fb7df8f558f9bc57f3c726ff3c695dde0261fbebc
     dependencies:
-    - name: cleishm/idfxx_core
-      registry_url: https://components.espressif.com
-      require: public
-      version: ^1.0.0
     - name: idf
-      require: private
       version: '>=5.5'
+    - git: https://github.com/cleishm/idfxx.git
+      name: cleishm/idfxx_core
+      path: components/idfxx_core
+      public: true
+      version: ae603b1c6c531bd0defbb57f226f0ba3981dd9c6
     source:
-      registry_url: https://components.espressif.com
-      type: service
-    version: 1.0.1
+      git: https://github.com/cleishm/idfxx.git
+      path: components/idfxx_hw_support
+      type: git
+    version: ae603b1c6c531bd0defbb57f226f0ba3981dd9c6
   cleishm/idfxx_i2c:
-    component_hash: 8254c1228521bdc9a4c85a2a25e9035afcbdcb843b4a578172546f823abf58e9
+    component_hash: f668671bda829fceabb39c606c00ae4f78bfacd624fbc90da96ca42de3132975
     dependencies:
-    - name: cleishm/frequency
-      registry_url: https://components.espressif.com
-      require: public
-      version: ^1.1.2
-    - name: cleishm/idfxx_core
-      registry_url: https://components.espressif.com
-      require: public
-      version: ^1.0.0
-    - name: cleishm/idfxx_gpio
-      registry_url: https://components.espressif.com
-      require: public
-      version: ^1.0.0
-    - name: cleishm/idfxx_hw_support
-      registry_url: https://components.espressif.com
-      require: public
-      version: ^1.0.0
     - name: idf
-      require: private
       version: '>=5.5'
+    - git: https://github.com/cleishm/idfxx.git
+      name: cleishm/idfxx_core
+      path: components/idfxx_core
+      public: true
+      version: ae603b1c6c531bd0defbb57f226f0ba3981dd9c6
+    - git: https://github.com/cleishm/idfxx.git
+      name: cleishm/idfxx_gpio
+      path: components/idfxx_gpio
+      public: true
+      version: ae603b1c6c531bd0defbb57f226f0ba3981dd9c6
+    - git: https://github.com/cleishm/idfxx.git
+      name: cleishm/idfxx_hw_support
+      path: components/idfxx_hw_support
+      public: true
+      version: ae603b1c6c531bd0defbb57f226f0ba3981dd9c6
+    - name: cleishm/quanta
+      public: true
+      version: ^0.1.0
     source:
-      registry_url: https://components.espressif.com
-      type: service
-    version: 1.0.1
+      git: https://github.com/cleishm/idfxx.git
+      path: components/idfxx_i2c
+      type: git
+    version: ae603b1c6c531bd0defbb57f226f0ba3981dd9c6
   cleishm/idfxx_panel_io:
-    component_hash: e0cc6ff3060e3521f4cb5f650f77dac927965d1f95ade71044206f02553e756d
+    component_hash: 663331456a8271acf0b3940aa9026a160ac02c7a03e2dcc64d8f8883c5d798a1
     dependencies:
-    - name: cleishm/frequency
-      registry_url: https://components.espressif.com
-      require: public
-      version: ^1.1.1
-    - name: cleishm/idfxx_core
-      registry_url: https://components.espressif.com
-      require: public
-      version: ^1.0.0
-    - name: cleishm/idfxx_gpio
-      registry_url: https://components.espressif.com
-      require: public
-      version: ^1.0.0
-    - name: cleishm/idfxx_i2c
-      registry_url: https://components.espressif.com
-      require: public
-      version: ^1.0.0
-    - name: cleishm/idfxx_spi
-      registry_url: https://components.espressif.com
-      require: public
-      version: ^1.0.0
     - name: idf
-      require: private
       version: '>=5.5'
+    - git: https://github.com/cleishm/idfxx.git
+      name: cleishm/idfxx_core
+      path: components/idfxx_core
+      public: true
+      version: ae603b1c6c531bd0defbb57f226f0ba3981dd9c6
+    - git: https://github.com/cleishm/idfxx.git
+      name: cleishm/idfxx_gpio
+      path: components/idfxx_gpio
+      public: true
+      version: ae603b1c6c531bd0defbb57f226f0ba3981dd9c6
+    - git: https://github.com/cleishm/idfxx.git
+      name: cleishm/idfxx_spi
+      path: components/idfxx_spi
+      public: true
+      version: ae603b1c6c531bd0defbb57f226f0ba3981dd9c6
+    - git: https://github.com/cleishm/idfxx.git
+      name: cleishm/idfxx_i2c
+      path: components/idfxx_i2c
+      public: true
+      version: ae603b1c6c531bd0defbb57f226f0ba3981dd9c6
+    - name: cleishm/quanta
+      public: true
+      version: ^0.1.0
     source:
-      registry_url: https://components.espressif.com/
-      type: service
-    version: 1.0.0
+      git: https://github.com/cleishm/idfxx.git
+      path: components/idfxx_panel_io
+      type: git
+    version: ae603b1c6c531bd0defbb57f226f0ba3981dd9c6
   cleishm/idfxx_spi:
-    component_hash: 63bd0ce3d2573830a729cdb1f078f5f037055c4255cd42f7f0ca8660f024bc3f
+    component_hash: 5773f50fc1fb22cd52f667289f7fd6d5dae75dd8615a4ff9c5a420231922e969
     dependencies:
-    - name: cleishm/frequency
-      registry_url: https://components.espressif.com
-      require: public
-      version: ^1.1.2
-    - name: cleishm/idfxx_core
-      registry_url: https://components.espressif.com
-      require: public
-      version: ^1.0.0
-    - name: cleishm/idfxx_gpio
-      registry_url: https://components.espressif.com
-      require: public
-      version: ^1.0.0
-    - name: cleishm/idfxx_hw_support
-      registry_url: https://components.espressif.com
-      require: public
-      version: ^1.0.0
+    - name: idf
+      version: '>=5.5'
+    - git: https://github.com/cleishm/idfxx.git
+      name: cleishm/idfxx_core
+      path: components/idfxx_core
+      public: true
+      version: ae603b1c6c531bd0defbb57f226f0ba3981dd9c6
+    - git: https://github.com/cleishm/idfxx.git
+      name: cleishm/idfxx_hw_support
+      path: components/idfxx_hw_support
+      public: true
+      version: ae603b1c6c531bd0defbb57f226f0ba3981dd9c6
+    - git: https://github.com/cleishm/idfxx.git
+      name: cleishm/idfxx_gpio
+      path: components/idfxx_gpio
+      public: true
+      version: ae603b1c6c531bd0defbb57f226f0ba3981dd9c6
+    - name: cleishm/quanta
+      public: true
+      version: ^0.1.0
+    source:
+      git: https://github.com/cleishm/idfxx.git
+      path: components/idfxx_spi
+      type: git
+    version: ae603b1c6c531bd0defbb57f226f0ba3981dd9c6
+  cleishm/quanta:
+    component_hash: 4ae9c319a8f0e1c55f870b621951813c6c7caa11e28089c802a11651cc7e882c
+    dependencies:
     - name: idf
       require: private
-      version: '>=5.5'
+      version: '>=5.1'
     source:
       registry_url: https://components.espressif.com/
       type: service
-    version: 1.1.1
+    version: 0.1.0
   espressif/mqtt:
     component_hash: fb18bc3b65aa8c94693a9811ffc322cca8a65d92d5ec84983d3e385080e3969c
     dependencies:
@@ -234,18 +266,14 @@ dependencies:
       type: service
     version: 1.22.3
 direct_dependencies:
-- cleishm/frequency
-- cleishm/idfxx_core
 - cleishm/idfxx_epaper
 - cleishm/idfxx_epaper_uc8179
 - cleishm/idfxx_font_spleen
 - cleishm/idfxx_gfx
-- cleishm/idfxx_gpio
-- cleishm/idfxx_panel_io
 - cleishm/idfxx_spi
 - espressif/mqtt
 - idf
 - joltwallet/littlefs
-manifest_hash: 3eafce279a1dc198ea6643aa5e7c8df21c6e2d84ec4a7c8f96757dd52f30dfd4
+manifest_hash: 809897f04ec11980c3864903812ed430692bc4d1846b5e4b9fef2722521a0c49
 target: esp32s3
 version: 3.0.0

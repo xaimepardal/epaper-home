@@ -1,14 +1,27 @@
 dependencies:
   idf: ">=5.5"
-  # Copias parcheadas (restore_baseline): ver components/*/PATCH.md
-  cleishm/idfxx_epaper:
-    version: "^1.0.0"
-    override_path: "../components/idfxx_epaper"
+  # idfxx desde el PR cleishm/idfxx#145 (restore_baseline), aún sin publicar en
+  # el registro. Todos los componentes idfxx salen del mismo commit; cuando haya
+  # release, volver a versiones del registro.
   cleishm/idfxx_epaper_uc8179:
-    version: "^1.0.0"
-    override_path: "../components/idfxx_epaper_uc8179"
-  cleishm/idfxx_gfx: "^1.0.0"
-  cleishm/idfxx_spi: "^1.0.0"
-  cleishm/idfxx_font_spleen: "^1.0.0"
+    git: https://github.com/cleishm/idfxx.git
+    path: components/idfxx_epaper_uc8179
+    version: ae603b1c6c531bd0defbb57f226f0ba3981dd9c6
+  cleishm/idfxx_epaper:
+    git: https://github.com/cleishm/idfxx.git
+    path: components/idfxx_epaper
+    version: ae603b1c6c531bd0defbb57f226f0ba3981dd9c6
+  cleishm/idfxx_gfx:
+    git: https://github.com/cleishm/idfxx.git
+    path: components/idfxx_gfx
+    version: ae603b1c6c531bd0defbb57f226f0ba3981dd9c6
+  cleishm/idfxx_spi:
+    git: https://github.com/cleishm/idfxx.git
+    path: components/idfxx_spi
+    version: ae603b1c6c531bd0defbb57f226f0ba3981dd9c6
+  cleishm/idfxx_font_spleen:
+    git: https://github.com/cleishm/idfxx.git
+    path: components/idfxx_font_spleen
+    version: ae603b1c6c531bd0defbb57f226f0ba3981dd9c6
   espressif/mqtt: "^1.0.0"
   joltwallet/littlefs: "^1.22.0"
