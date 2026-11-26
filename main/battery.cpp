@@ -8,6 +8,7 @@
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
 #include "esp_adc/adc_oneshot.h"
+#include "esp_err.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 
@@ -29,6 +30,37 @@ static void enable_divider(bool enabled)
     }
 }
 
+// Media de la mitad central de SAMPLES lecturas, en mV en el pin, o -1. Una
+// lectura fallida suelta no invalida la medida.
+static int read_pin_mv(adc_oneshot_unit_handle_t adc, adc_cali_handle_t cali, adc_channel_t channel)
+{
+    int discard;
+    (void)adc_oneshot_read(adc, channel, &discard);  // la primera conversión tras configurar sale baja
+    std::array<int, SAMPLES> mv{};
+    int valid = 0;
+    esp_err_t err = ESP_OK;
+    for (int i = 0; i < SAMPLES; ++i) {
+        const esp_err_t e = adc_oneshot_get_calibrated_result(adc, cali, channel, &mv[valid]);
+        if (e == ESP_OK) {
+            ++valid;
+        } else {
+            err = e;
+        }
+    }
+    if (valid < SAMPLES * 3 / 4) {
+        ESP_LOGW(TAG, "%d/%d lecturas válidas (%s)", valid, SAMPLES, esp_err_to_name(err));
+        return -1;
+    }
+    std::sort(mv.begin(), mv.begin() + valid);
+    const int lo = valid / 4;
+    const int hi = valid - valid / 4;
+    int sum = 0;
+    for (int i = lo; i < hi; ++i) {
+        sum += mv[i];
+    }
+    return sum / (hi - lo);
+}
+
 int battery_mv()
 {
     adc_unit_t unit;
@@ -37,40 +69,37 @@ int battery_mv()
     adc_cali_handle_t cali = nullptr;
     int result = -1;
 
-    adc_oneshot_unit_init_cfg_t unit_cfg{};
-    adc_oneshot_chan_cfg_t chan_cfg{.atten = ADC_ATTEN_DB_12, .bitwidth = ADC_BITWIDTH_DEFAULT};
-    adc_cali_curve_fitting_config_t cali_cfg{};
-    if (adc_oneshot_io_to_channel(GPIO_ADC, &unit, &channel) != ESP_OK) {
-        return -1;
+    esp_err_t err = adc_oneshot_io_to_channel(GPIO_ADC, &unit, &channel);
+    if (err == ESP_OK) {
+        adc_oneshot_unit_init_cfg_t unit_cfg{.unit_id = unit};
+        err = adc_oneshot_new_unit(&unit_cfg, &adc);
     }
-    unit_cfg.unit_id = unit;
-    cali_cfg = {.unit_id = unit, .chan = channel, .atten = ADC_ATTEN_DB_12, .bitwidth = ADC_BITWIDTH_DEFAULT};
-    if (adc_oneshot_new_unit(&unit_cfg, &adc) != ESP_OK ||
-        adc_oneshot_config_channel(adc, channel, &chan_cfg) != ESP_OK ||
-        adc_cali_create_scheme_curve_fitting(&cali_cfg, &cali) != ESP_OK) {
-        ESP_LOGE(TAG, "No se pudo preparar el ADC");
+    if (err == ESP_OK) {
+        adc_oneshot_chan_cfg_t chan_cfg{.atten = ADC_ATTEN_DB_12, .bitwidth = ADC_BITWIDTH_DEFAULT};
+        err = adc_oneshot_config_channel(adc, channel, &chan_cfg);
+    }
+    if (err == ESP_OK) {
+        adc_cali_curve_fitting_config_t cali_cfg{
+            .unit_id = unit, .chan = channel, .atten = ADC_ATTEN_DB_12, .bitwidth = ADC_BITWIDTH_DEFAULT};
+        err = adc_cali_create_scheme_curve_fitting(&cali_cfg, &cali);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "No se pudo preparar el ADC: %s", esp_err_to_name(err));
     } else {
         enable_divider(true);
         vTaskDelay(pdMS_TO_TICKS(10));  // que se estabilice el divisor (Seeed espera 5 ms)
-        std::array<int, SAMPLES> mv{};
-        int valid = 0;
-        for (int &m : mv) {
-            if (adc_oneshot_get_calibrated_result(adc, cali, channel, &m) == ESP_OK) {
-                ++valid;
-            } else {
-                m = -1;
+        // Un segundo intento si falla o sale fuera del rango de una LiPo (p. ej. el
+        // divisor aún no estable): sale más barato que mostrar "?" hasta el siguiente despertar
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            const int pin = read_pin_mv(adc, cali, channel);
+            result = pin < 0 ? -1 : 2 * pin;  // divisor 1/2
+            if (battery_percent(result) >= 0) {
+                break;
             }
+            ESP_LOGW(TAG, "Lectura descartada: %d mV", result);
+            vTaskDelay(pdMS_TO_TICKS(10));
         }
         enable_divider(false);
-        if (valid == SAMPLES) {
-            // Media de la mitad central: descarta picos del ruido de la placa
-            std::ranges::sort(mv);
-            int sum = 0;
-            for (auto it = mv.begin() + SAMPLES / 4; it != mv.end() - SAMPLES / 4; ++it) {
-                sum += *it;
-            }
-            result = 2 * sum / (SAMPLES / 2);  // divisor 1/2
-        }
     }
     if (cali != nullptr) {
         adc_cali_delete_scheme_curve_fitting(cali);
