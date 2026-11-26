@@ -18,7 +18,7 @@ Firmware para el **Seeed Studio reTerminal E1001** (ESP32-S3 + ePaper monocromo 
   - Mientras dura una tanda de pulsaciones el panel se queda encendido y en modo parcial, y solo se le envía la zona que cambia; se duerme (y se guarda el cristal en `frame.bin`) al terminar. Así cada pulsación es un refresco parcial, sin reiniciar el controlador.
   - Tras despertar por un botón sigue 6 s despierto por si se pulsa otra vez.
   - El refresco completo periódico (cada 10 parciales o 24 h) no interrumpe la navegación: se aplaza a la siguiente comprobación por tiempo, y entonces se hace aunque la imagen no haya cambiado.
-- **Refresco parcial incluso tras deep sleep**. El último frame se guarda en LittleFS y, al despertar, se carga como imagen de referencia del controlador mediante un [parche del driver](#parche-del-driver-uc8179).
+- **Refresco parcial incluso tras deep sleep**. El último frame se guarda en LittleFS y, al despertar, se carga como imagen de referencia del controlador con `restore_baseline()` del driver ([ver abajo](#restore_baseline-del-driver-uc8179)).
 - **Refresco completo cuando conviene**. Se hace uno tras cualquier reinicio que no sea un deep sleep, cada 10 refrescos parciales, cada 24 h o si el frame guardado no es fiable; así se limpian los restos que deja el parcial.
 - **Sin refrescos innecesarios**. Si la imagen resultante es idéntica a la que ya hay en pantalla, no se refresca.
 - **MQTT con TLS y usuario**. Admite `mqtts://` con la CA propia del broker incrustada en el firmware ([`main/certs/`](main/certs/README.md)) o con el bundle de CAs públicas, y usuario y contraseña. Los fallos de TLS y de autenticación se explican en el log.
@@ -57,7 +57,7 @@ Para la herramienta del PC también hacen falta **Pillow** y **mosquitto_pub** (
 
 Los declara [`main/idf_component.yml`](main/idf_component.yml) y ESP-IDF los descarga al compilar:
 
-- [`cleishm/idfxx`](https://github.com/cleishm/idfxx): wrappers C++ para ESP-IDF (SPI, gráficos, fuentes y [driver UC8179](https://components.espressif.com/components/cleishm/idfxx_epaper_uc8179)). La fuente es [Spleen](https://github.com/fcambus/spleen).
+- [`cleishm/idfxx`](https://github.com/cleishm/idfxx): wrappers C++ para ESP-IDF (SPI, gráficos, fuentes y [driver UC8179](https://components.espressif.com/components/cleishm/idfxx_epaper_uc8179)). La fuente es [Spleen](https://github.com/fcambus/spleen). De momento se descarga de git, fijado al commit del [PR #145](https://github.com/cleishm/idfxx/pull/145) (`restore_baseline`), hasta que salga en una release del registro.
 - [`espressif/mqtt`](https://components.espressif.com/components/espressif/mqtt): cliente MQTT.
 - [`joltwallet/littlefs`](https://components.espressif.com/components/joltwallet/littlefs): sistema de ficheros para guardar el último frame.
 
@@ -252,7 +252,6 @@ main/epaper_mqtt.cpp      Firmware: MQTT, galería, botones, refresco y deep sle
 main/Kconfig.projbuild    Opciones de menuconfig "ePaper MQTT"
 main/certs/               CA propia del broker MQTT (opcional, no versionada)
 main/idf_component.yml    Dependencias del registro de componentes
-components/idfxx_epaper*  Copias parcheadas del driver ePaper (ver abajo)
 partitions.csv            Tabla de particiones para los 32 MB de flash
 tools/enviar_imagen.py    Conversión y publicación de imágenes desde el PC
 ```
@@ -266,14 +265,11 @@ tools/enviar_imagen.py    Conversión y publicación de imágenes desde el PC
 | `coredump` | 64 KB | Volcado de fallos |
 | `storage` | ~19,8 MB | LittleFS: imágenes por índice (`imgNNN.bin`), índice seleccionado, último frame pintado y suscripción de la sesión (`sub.txt`) |
 
-### Parche del driver UC8179
+### `restore_baseline()` del driver UC8179
 
-`components/idfxx_epaper` y `components/idfxx_epaper_uc8179` son copias de [`cleishm/idfxx`](https://github.com/cleishm/idfxx) v1.0.0 (Apache-2.0) con estos cambios, marcados en el código como `[epaper_mqtt patch]`:
+Tras despertar, el UC8179 ha perdido su RAM y el driver convertiría el siguiente refresco parcial en uno completo, con parpadeo. `panel::restore_baseline()` carga el frame guardado en `frame.bin` en las RAM de «imagen anterior» (comando `0x10`) y «nueva» (`0x13`) del controlador, de modo que el siguiente refresco puede ser parcial.
 
-- `panel::restore_baseline()`: tras despertar el panel, escribe el frame que hay en el cristal en la RAM de «imagen anterior» del UC8179 (comando `0x10`), de modo que el siguiente refresco puede ser parcial. Sin esto, cada despertar obligaría a un refresco completo con parpadeo.
-- `mono_framebuffer::data()` modificable, para cargar un frame guardado.
-
-Más detalles en [`components/idfxx_epaper/PATCH.md`](components/idfxx_epaper/PATCH.md). Si se actualiza la librería, hay que volver a aplicar el parche.
+Empezó como un parche local sobre idfxx v1.0.0 y se ha incorporado a la librería en [cleishm/idfxx#145](https://github.com/cleishm/idfxx/pull/145) (issue [#140](https://github.com/cleishm/idfxx/issues/140)). Mientras no esté en una release, [`main/idf_component.yml`](main/idf_component.yml) toma todos los componentes idfxx de ese commit por git; cuando se publique, basta con cambiarlos a versiones del registro.
 
 ## Referencias
 

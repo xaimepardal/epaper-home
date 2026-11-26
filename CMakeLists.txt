@@ -4,6 +4,3 @@ cmake_minimum_required(VERSION 3.22)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(epaper_mqtt)
-
-idf_component_get_property(spi_lib cleishm__idfxx_spi COMPONENT_LIB)
-target_compile_options(${spi_lib} PRIVATE -Wno-missing-field-initializers)
