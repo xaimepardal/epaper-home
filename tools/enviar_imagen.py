@@ -66,8 +66,9 @@ def main():
     parser.add_argument("image", metavar="imagen", nargs="?")
     parser.add_argument("--borrar", dest="delete", action="store_true", help="borra la imagen de ese índice")
     parser.add_argument("--host", default="test.mosquitto.org")
-    parser.add_argument("--puerto", dest="port", type=int, help="por defecto 1883, o 8883 con --ca")
-    parser.add_argument("--ca", help="CA del broker para TLS (mqtts)")
+    parser.add_argument("--puerto", dest="port", type=int, help="por defecto 8883 (1883 con --sin-tls)")
+    parser.add_argument("--ca", help="CA propia del broker (sin ella, las CAs del sistema)")
+    parser.add_argument("--sin-tls", dest="plaintext", action="store_true", help="mqtt:// en claro")
     parser.add_argument("--usuario", dest="user", help="usuario MQTT (contraseña: MQTT_PASS o se pide)")
     parser.add_argument("--topic", default="reterminal/imagen", help="prefijo: se publica en <topic>/<índice>")
     parser.add_argument("--umbral", dest="threshold", type=int, help="0-255: blanco/negro puro en vez de tramado")
@@ -93,9 +94,15 @@ def main():
             return
         payload = compressed
 
-    connection = ["-h", args.host, "-p", str(args.port or (8883 if args.ca else 1883))]
+    if args.plaintext and args.ca:
+        parser.error("--ca y --sin-tls son incompatibles")
+    # test.mosquitto.org: 8886 = TLS con certificado de Let's Encrypt
+    default_port = 1883 if args.plaintext else 8886 if args.host == "test.mosquitto.org" else 8883
+    connection = ["-h", args.host, "-p", str(args.port or default_port)]
     if args.ca:
         connection += ["--cafile", args.ca]
+    elif not args.plaintext:
+        connection += ["--capath", "/etc/ssl/certs"]
 
     topic = f"{args.topic}/{args.index}"
     publish = ["mosquitto_pub", *connection, "-t", topic, "-q", "1", "-r"]

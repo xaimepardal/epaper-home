@@ -49,7 +49,7 @@ Pines que usa el firmware: SPI de la pantalla con MOSI en 9, SCLK en 7, CS en 10
 | ESP-IDF | **v6.1** (rama `release/v6.1`) | [GitHub](https://github.com/espressif/esp-idf) · [Guía de instalación (ESP32-S3)](https://docs.espressif.com/projects/esp-idf/en/latest/esp32s3/get-started/index.html) |
 | Git, Python 3, CMake, Ninja | los que pide ESP-IDF | [Requisitos en Linux/macOS](https://docs.espressif.com/projects/esp-idf/en/latest/esp32s3/get-started/linux-macos-setup.html) |
 | Conexión a Internet | — | La primera compilación descarga los componentes del [registro de Espressif](https://components.espressif.com) |
-| Broker MQTT | cualquiera | Por defecto el público `test.mosquitto.org`; para uso real, uno propio, como [Mosquitto](https://mosquitto.org/) |
+| Broker MQTT | cualquiera | Por defecto el público `test.mosquitto.org` (con TLS, pero cualquiera puede publicar en él); para uso real, uno propio, como [Mosquitto](https://mosquitto.org/) |
 
 Para la herramienta del PC también hacen falta **Pillow** y **mosquitto_pub** (Arch/Manjaro: `sudo pacman -S python-pillow mosquitto`; Fedora: `sudo dnf install python3-pillow mosquitto`; Debian/Ubuntu: `sudo apt install python3-pil mosquitto-clients`).
 
@@ -106,7 +106,7 @@ idf.py menuconfig
 
 | Opción | Por defecto | |
 |---|---|---|
-| URI del broker MQTT | `mqtt://test.mosquitto.org` | `mqtt://host:1883` sin cifrar o `mqtts://host:8883` con TLS ([ver abajo](#broker-con-tls-y-ca-propia)) |
+| URI del broker MQTT | `mqtts://test.mosquitto.org:8886` | `mqtts://host:8883` con TLS ([ver abajo](#broker-con-tls-y-ca-propia)); `mqtt://` sólo activando *Permitir mqtt:// sin TLS* |
 | Usuario MQTT | vacío (anónimo) | |
 | Contraseña MQTT | vacío | se guarda en `sdkconfig` |
 | Prefijo de los topics de imágenes | `reterminal/imagen` | cada imagen en `<prefijo>/<índice>` |
@@ -127,7 +127,7 @@ idf.py menuconfig
 | Parciales antes de un completo | 10 | |
 | Horas máximas sin completo | 24 | |
 
-> ⚠️ La configuración se guarda en `sdkconfig`, **que contiene las contraseñas de la WiFi y de MQTT**. Está en `.gitignore`: no lo subas al repositorio.
+> ⚠️ La configuración se guarda en `sdkconfig`, **que contiene las contraseñas de la WiFi y de MQTT**. Está en `.gitignore`: no lo subas al repositorio. Además van compiladas en el firmware: sin cifrado de flash, cualquiera con acceso al USB las lee con `esptool read_flash`. Para cifrarla, ver [`sdkconfig.secure`](sdkconfig.secure) (quema eFuses, irreversible).
 
 ### Broker con TLS y CA propia
 
@@ -182,9 +182,9 @@ tools/enviar_imagen.py 2 --borrar
 **Imagen en blanco en el índice 0 sin la herramienta:**
 
 ```bash
-python3 -c "import zlib,sys; sys.stdout.buffer.write(zlib.compress(b'\xff'*48000))" | mosquitto_pub -h test.mosquitto.org -t reterminal/imagen/0 -q 1 -r -s
-mosquitto_pub -h test.mosquitto.org -t reterminal/imagen/0 -q 1 -r -n   # y borrarla
-mosquitto_sub -h test.mosquitto.org -t reterminal/estado -C 1            # último estado del dispositivo
+python3 -c "import zlib,sys; sys.stdout.buffer.write(zlib.compress(b'\xff'*48000))" | mosquitto_pub -h test.mosquitto.org -p 8886 --capath /etc/ssl/certs -t reterminal/imagen/0 -q 1 -r -s
+mosquitto_pub -h test.mosquitto.org -p 8886 --capath /etc/ssl/certs -t reterminal/imagen/0 -q 1 -r -n   # y borrarla
+mosquitto_sub -h test.mosquitto.org -p 8886 --capath /etc/ssl/certs -t reterminal/estado -C 1            # último estado del dispositivo
 ```
 
 Con un broker con TLS y usuario, añade a `mosquitto_pub` las opciones `-p 8883 --cafile main/certs/mqtt_ca.crt -u <usuario> -P <contraseña>` (`enviar_imagen.py` no usa `-P`, para que la contraseña no se vea en `ps`: se la pasa a `mosquitto_pub` en un fichero de configuración temporal). El usuario que publica necesita permiso de **escritura** en `reterminal/imagen/<índice>` (en el ACL se puede limitar cada servicio a su hueco, p. ej. `topic write reterminal/imagen/0`).

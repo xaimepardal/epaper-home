@@ -101,6 +101,13 @@ static constexpr bool SHOW_BATTERY = true;
 #else
 static constexpr bool SHOW_BATTERY = false;
 #endif
+#ifdef CONFIG_MQTT_ALLOW_PLAINTEXT
+static constexpr bool ALLOW_PLAINTEXT = true;
+#else
+static constexpr bool ALLOW_PLAINTEXT = false;
+#endif
+static_assert(ALLOW_PLAINTEXT || std::string_view(CONFIG_BROKER_URI).starts_with("mqtts://"),
+              "CONFIG_BROKER_URI sin TLS: usa mqtts:// o activa CONFIG_MQTT_ALLOW_PLAINTEXT");
 #ifdef CONFIG_NO_DEEP_SLEEP
 static constexpr bool NO_DEEP_SLEEP = true;
 #else

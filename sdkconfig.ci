@@ -1,0 +1,2 @@
+# Sólo para CI: valores que menuconfig pediría
+CONFIG_BROKER_URI="mqtts://broker.example:8883"

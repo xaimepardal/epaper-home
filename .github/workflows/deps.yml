@@ -1,0 +1,32 @@
+# Dependabot no entiende el gestor de componentes de ESP-IDF: resolución semanal
+# de dependencies.lock dentro de los rangos de idf_component.yml y PR si cambia.
+# Requiere "Allow GitHub Actions to create and approve pull requests" en el repo.
+name: deps
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v6.1.1
+          target: esp32s3
+          command: idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.ci" update-dependencies
+      - run: sudo chown -R "$(id -u):$(id -g)" .
+      - uses: peter-evans/create-pull-request@v7
+        with:
+          branch: deps/idf-components
+          title: Actualizar componentes de ESP-IDF
+          commit-message: Actualizar dependencies.lock
+          add-paths: dependencies.lock
+          body: Generado por `idf.py update-dependencies`.

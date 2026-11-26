@@ -58,12 +58,21 @@ menu "ePaper MQTT"
 
     config BROKER_URI
         string "URI del broker MQTT"
-        default "mqtt://test.mosquitto.org"
+        default "mqtts://test.mosquitto.org:8886"
         help
-            mqtt://host[:1883] sin cifrar, o mqtts://host[:8883] con TLS.
+            mqtts://host[:8883] con TLS; mqtt:// sólo con MQTT_ALLOW_PLAINTEXT.
+            El de por defecto es público y anónimo: cualquiera puede publicar
+            imágenes en él. Sólo para probar.
             Con TLS el host tiene que figurar en el certificado del broker (CN o
             SAN; puede ser una IP si el SAN la incluye). Para una CA propia,
             copia su certificado en main/certs/mqtt_ca.crt.
+
+    config MQTT_ALLOW_PLAINTEXT
+        bool "Permitir mqtt:// sin TLS"
+        default n
+        help
+            Sin TLS, cualquiera en la red ve el usuario y la contraseña MQTT y
+            puede inyectar imágenes. Sin esta opción, un URI mqtt:// no compila.
 
     config MQTT_USERNAME
         string "Usuario MQTT (vacío = anónimo)"

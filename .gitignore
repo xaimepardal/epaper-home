@@ -13,7 +13,9 @@ main/certs/*.crt
 __pycache__/
 *.pyc
 
-# Secretos locales (claves, credenciales)
+# Secretos locales (claves, credenciales; firma de Secure Boot)
+*.key
+*_key.pem
 .env
 *.env
 
