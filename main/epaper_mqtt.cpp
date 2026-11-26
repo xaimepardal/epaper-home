@@ -122,8 +122,8 @@ struct rtc_state {
     time_t t_next_check;     // próxima comprobación de MQTT
     time_t t_last_ntp;       // última hora correcta por SNTP (0 = nunca en este arranque)
     net_state network;
-    int8_t battery;       // % que se muestra (múltiplo de 5), -1 = sin medida válida
-    int16_t battery_mv;   // última medida, para el estado MQTT (-1 = falló)
+    int8_t battery = -1;      // % que se muestra (múltiplo de 5), -1 = sin medida válida
+    int16_t battery_mv = -1;  // última medida, para el estado MQTT (-1 = falló)
 };
 RTC_DATA_ATTR static rtc_state rtc;
 
@@ -583,8 +583,11 @@ static void update_battery()
     rtc.battery_mv = static_cast<int16_t>(battery_mv());
     const int pct = battery_percent(rtc.battery_mv);
     if (pct < 0) {
-        rtc.battery = -1;
-    } else if (rtc.battery < 0 || std::abs(pct - rtc.battery) > 3) {
+        // Se mantiene el último % válido: una medida fallida suelta no debe
+        // repintar con "?". El fallo queda en battery_mv (estado MQTT).
+        return;
+    }
+    if (rtc.battery < 0 || std::abs(pct - rtc.battery) > 3) {
         rtc.battery = static_cast<int8_t>((pct + 2) / 5 * 5);
     }
 }
