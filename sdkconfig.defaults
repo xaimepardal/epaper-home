@@ -19,3 +19,5 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 # un retardo aleatorio de hasta 5 s.
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 # CONFIG_LWIP_SNTP_STARTUP_DELAY is not set
+# Canarios de pila en funciones con buffers locales (el handler MQTT procesa datos de red)
+CONFIG_COMPILER_STACK_CHECK_MODE_NORM=y

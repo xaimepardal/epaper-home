@@ -1,0 +1,22 @@
+# Endurecimiento opcional. QUEMA eFuses en el primer arranque: no hay vuelta atrás.
+#   idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.secure" fullclean build flash
+# Después, reflashear con `idf.py encrypted-flash` (sólo app; el bootloader ya no se puede tocar en claro).
+#
+# Sin esto, `esptool read_flash` por USB saca en claro la contraseña WiFi, la de MQTT
+# y la CA (van compiladas en la app desde sdkconfig).
+
+# Cifrado de flash en modo desarrollo: sigue permitiendo reflashear por UART.
+# Pasar a RELEASE (deshabilita descarga en claro y JTAG) sólo con el firmware estable.
+CONFIG_SECURE_FLASH_ENC_ENABLED=y
+CONFIG_SECURE_FLASH_ENCRYPTION_MODE_DEVELOPMENT=y
+
+# NVS sólo guarda la calibración RF (la WiFi usa WIFI_STORAGE_RAM): cifrarla exigiría
+# una partición nvs_keys o una clave HMAC en eFuse sin aportar nada.
+# CONFIG_NVS_ENCRYPTION is not set
+
+# Secure Boot v2: impide arrancar firmware no firmado por USB. Requiere generar y
+# custodiar la clave (perderla = no poder actualizar nunca más) y probablemente
+# mover CONFIG_PARTITION_TABLE_OFFSET (el bootloader crece). No activado.
+# CONFIG_SECURE_BOOT=y
+# CONFIG_SECURE_BOOT_V2_ENABLED=y
+# CONFIG_SECURE_BOOT_SIGNING_KEY="secure_boot_signing_key.pem"
